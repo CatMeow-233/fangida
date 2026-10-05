@@ -1,6 +1,7 @@
 """Persistent project tools share the MCP session and enforce write opt-in."""
 from __future__ import annotations
 
+from contextlib import closing
 import tempfile
 import sqlite3
 import unittest
@@ -96,7 +97,7 @@ class McpProjectTests(unittest.TestCase):
             self.assertTrue(denied["isError"])
         finally:
             reader.close()
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             ProjectStore._create_v1(connection)
             connection.execute("PRAGMA user_version=1")
         reader = McpServer(settings=Settings())
@@ -105,7 +106,7 @@ class McpProjectTests(unittest.TestCase):
                 "path": str(self.database)})["isError"])
         finally:
             reader.close()
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
         writer = McpServer(allow_writes=True, settings=Settings())
         try:
@@ -113,7 +114,7 @@ class McpProjectTests(unittest.TestCase):
             self.assertEqual(value(writer, "project_history", project=opened)["total"], 0)
         finally:
             writer.close()
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
 
     def test_content_scoped_read_only_annotations(self) -> None:

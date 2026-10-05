@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -89,13 +90,13 @@ class ProjectStoreTests(unittest.TestCase):
 
     def test_upgrade_v1_and_reject_newer_schema(self) -> None:
         self.database.parent.mkdir(parents=True)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             ProjectStore._create_v1(connection)
             connection.execute("PRAGMA user_version=1")
         migrated = ProjectStore(self.database)
         migrated.rename_symbol(self.source, 123, "foo")
         self.assertEqual(migrated.annotations(self.source)["renames"][123], "foo")
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA user_version=999")
         with self.assertRaises(ProjectSchemaError):
             ProjectStore(self.database)
@@ -132,7 +133,7 @@ class ProjectStoreTests(unittest.TestCase):
         self.source.write_bytes(b"binary-B")
         self.assertIsNone(reader.load_analysis(self.source))
         self.assertIsNone(writer.history(self.source)["items"][0]["invalidated_at"])
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA user_version=1")
         with self.assertRaises(ProjectSchemaError):
             ProjectStore(self.database, read_only=True)
