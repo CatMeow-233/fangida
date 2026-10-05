@@ -181,7 +181,7 @@ class PseudocodeView:
             if str(code.tk.call("tk", "windowingsystem")) == "aqua":
                 code.bind("<Button-2>", self._popup, add="+")
         except Exception:
-            pass
+            pass  # 平台探测失败只少了 aqua 下 Button-2（Tk 8.6 的右键）绑定；Ctrl+单击仍可弹出菜单
         header.bind("<Motion>", lambda event: self._hover_at(header, event), add="+")
         header.bind("<Leave>", lambda _event: self._clear_hover(), add="+")
         header.bind("<ButtonRelease-1>", self._header_click, add="+")
@@ -195,7 +195,7 @@ class PseudocodeView:
         try:
             self.frame.sashpos(0, max(200, min(300, width * 26 // 100)))
         except Exception:
-            pass
+            pass  # 分隔条尚未就绪或控件已销毁；保持默认比例，用户仍可手动拖动
 
     def _toggle_header(self) -> None:
         if self.show_header.get():
@@ -331,7 +331,7 @@ class PseudocodeView:
             first = float(self.code.yview()[0])
             insert = str(self.code.index("insert"))
         except Exception:
-            return
+            return  # 控件已销毁等；只是不记住滚动位置，不影响显示
         self._positions[(self.key, self.style)] = (first, insert)
         if len(self._positions) > 256:
             self._positions.pop(next(iter(self._positions)))
@@ -380,7 +380,7 @@ class PseudocodeView:
         try:
             return self.code.focus_get() is self.code
         except Exception:
-            return False
+            return False  # focus_get 遇到 Tcl 自建窗口（弹出菜单/对话框）会抛 KeyError，视为无焦点
 
     # ------------------------------------------------------------------ 事件
     def _describe(self, target: JumpTarget, *, header: bool = False) -> str:
@@ -516,7 +516,7 @@ class PseudocodeView:
         try:
             text = self.code.get("sel.first", "sel.last")
         except Exception:
-            return
+            return  # 没有选区时 Tk 抛 TclError；无内容可复制，保持剪贴板不变
         self.code.clipboard_clear()
         self.code.clipboard_append(text)
 

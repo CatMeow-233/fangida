@@ -92,6 +92,8 @@ class ShortcutBinder:
                     return None
                 focus = self.window.focus_get()
             except Exception:
+                # 窗口已销毁（TclError）或焦点/grab 在 Tcl 自建弹窗上（KeyError）时
+                # 无法判定，按 editable_focus 的约定不抢按键，交还 Tk 默认处理。
                 return None
             if editable_focus(focus) and (command.scope == "view" or not modified):
                 return None

@@ -350,6 +350,8 @@ def _process_processor(image: Any) -> NativeDecoder | None:
     try:
         processor = get_processor(image.architecture, image.endian)
     except Exception:
+        # 只放弃子进程加速路径：进程内 _decode_region 会再次构造处理器，
+        # 并把同一异常记为警告与 decoder_unavailable 缺口，不会丢失。
         return None
     if (type(processor) is not NativeDecoder or processor.engine != "capstone" or processor.warning
             or NativeDecoder.decode_bytes_fast is not _BUILTIN_FAST

@@ -117,7 +117,7 @@ def _check_c_indent() -> bool:
                     fast = make({}, _default_raise, str_encoder, indent, ": ", ",",
                                 False, False, True)
                     text = "".join(fast(probe, level))
-                except Exception:  # 旧版本可能拒绝 str 缩进参数，视为不支持
+                except Exception:  # 构造或自检编码失败（如旧版本拒绝 str 缩进参数）均视为不支持，回退纯 Python
                     return False
                 if text != reference.replace("\n", "\n" + indent * level):
                     return False

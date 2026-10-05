@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from .operations import _Loaded  # 仅用于注解（保持 typing.get_type_hint
 # 注解里的 AnalysisView 由 fangida.gui 门面注入本模块（保持 typing.get_type_hints 可解析）；
 # 运行时引用的原 fangida.gui 模块级名字（AnalysisView、AnalysisService、PluginManager、Path 等导入的
 # 名字，以及函数、类和常量）一律经门面 _gui() 查找，对门面打的补丁因此仍作用于实现，与拆分前一致。
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -166,7 +169,10 @@ class _JobsMixin:
                 loaded = _gui()._prepare(_gui().AnalysisView._from_owned_result(preview),
                                          share_completed=True)
         except Exception:
-            return  # 预览只是提前显示；失败时等待最终结果即可
+            # 预览只是提前显示；失败时等待最终结果即可。只在预览（部分结果）上出现的缺陷不会在最终结果中
+            # 重现，静默返回会让它无声消失，因此记 debug 日志备查。
+            _log.debug("预览结果准备失败，等待最终结果", exc_info=True)
+            return
         loaded.preview = True
         self._messages.put((generation, loaded))
 

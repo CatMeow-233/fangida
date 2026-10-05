@@ -688,7 +688,7 @@ class WorkbenchController:
         try:
             return tab is not None and self.browser.notebook.select() == str(tab)
         except Exception:
-            return False
+            return False  # 窗口关闭后 notebook 已销毁会抛 TclError；视为不在伪代码页，调用方回退普通跳转
 
     def _pseudocode_target(self) -> Any:
         """伪代码标签页且代码区有焦点时，返回光标处的跳转目标。"""

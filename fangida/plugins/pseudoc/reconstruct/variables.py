@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from .cfg import predecessors, natural_loops
@@ -18,6 +19,8 @@ from .model import Value, Variable
 from .prototypes import lookup
 from .readability import Rewriter, integer_info, _literal_like, _wide_literal, WIDE_STRING_TYPE
 from .types import integer_type
+
+_log = logging.getLogger(__name__)
 
 _GENERIC = re.compile(r"(?:value|argument_value|result|arg|local)_?\d*(?:_\d+)*")
 _CHAR_POINTERS = frozenset({"char *", "const char *"})
@@ -637,6 +640,8 @@ def _loop_counters(blocks, entry):
     try:
         loops = natural_loops(blocks, entry)
     except Exception:
+        # 求循环失败只放弃 i/j/k 命名（保持通用名），但记录下来以免掩盖 CFG 缺陷。
+        _log.debug("natural_loops 失败，跳过循环计数器命名", exc_info=True)
         return {}
     names, result = ("i", "j", "k"), {}
     for header in sorted(loops, key=lambda item: (len(loops[item]), item), reverse=True):

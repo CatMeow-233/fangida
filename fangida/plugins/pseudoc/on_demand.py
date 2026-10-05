@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -33,6 +34,8 @@ from typing import Any
 
 from . import pipeline
 from .models import validate_limits
+
+_log = logging.getLogger(__name__)
 
 #: 默认单函数指令上限，与分析时的流水线相同。
 DEFAULT_MAX_INSTRUCTIONS = pipeline.DEFAULT_MAX_INSTRUCTIONS
@@ -369,7 +372,8 @@ class PseudocContext:
             try:
                 found.update(resolve_thunk_targets(state.result, candidates[offset:offset + MAX_LINKAGE_TARGETS]))
             except Exception:
-                pass  # 只是补充证据
+                # 只是补充证据（与流水线 _argument_closure 的处理相同）；记录调试日志以免掩盖链接解析缺陷
+                _log.debug("resolve_thunk_targets 失败，忽略本批形似桩函数的导入桩证据", exc_info=True)
         with self._lock:
             if state.stub_thunks is None:
                 state.stub_thunks = found

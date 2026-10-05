@@ -323,7 +323,7 @@ def _memo_lift(function: Mapping[str, Any], architecture: str,
         truncated = (limited or rendering.incomplete or bool(cfg.get("frontier")) or
                      cfg.get("complete") is False)
     except Exception:
-        return None
+        return None  # 仅放弃复用加速路径；调用方回退 lift_function，给出原实现的结果或错误。
     return {"instructions": list(rendering.microcode), "truncated": truncated,
             "microcode_version": MICROCODE_VERSION}
 

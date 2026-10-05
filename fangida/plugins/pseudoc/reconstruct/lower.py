@@ -1,6 +1,8 @@
 """Lift machine effects into named source values, locals and typed predicates."""
 from __future__ import annotations
 
+import logging
+
 from .abi import incoming_registers, signature, initial_widths, return_width, available_registers, _signature_and_incoming
 from .calls import restore_call, restore_transfer
 from .expressions import Expressions, _signed_value, cast, format_value, unsigned_arms
@@ -10,6 +12,8 @@ from .stack import Frame
 from .types import constraints, integer_type, valid_type, incoming_types
 from ..microcode.evaluate import declared_division_semantics
 from ..native_operands import identifier
+
+_log = logging.getLogger(__name__)
 
 
 # 各 ABI 的被调用者保存寄存器（只用于识别函数序言/尾声里的保存与恢复）。
@@ -203,6 +207,9 @@ class Recovery:
         try:
             shape = affine(_address_tree(attributes.get("address", "")), {root: 0})
         except Exception:
+            # 语法错误已由 parse_address 处理为 None；到这里的是非字符串地址、嵌套过深等意外情况，
+            # 仍按未识别回写处理，但留下调试日志以免掩盖上游缺陷。
+            _log.debug("回写地址无法分析，按未识别处理", exc_info=True)
             return None
         if not shape or shape[0] != 1:
             return None

@@ -186,6 +186,7 @@ def capstone_identity() -> tuple[Any, ...] | None:
         import capstone  # type: ignore[import-not-found]
         return (str(getattr(capstone, "__version__", "")), tuple(capstone.cs_version()))
     except Exception:
+        # 可选依赖探测：未安装或动态库加载失败都记为 None，仅作握手比较键；两端不一致会触发 HandshakeMismatch 回退进程内解码。
         return None
 
 

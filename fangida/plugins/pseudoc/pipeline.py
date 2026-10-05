@@ -1,6 +1,7 @@
 """Bounded pseudo-C enrichment after decode/CFG/xref stages have completed."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -15,6 +16,8 @@ DEFAULT_MAX_INSTRUCTIONS = 512
 #: 原生伪 C 支持的架构。
 NATIVE_ARCHITECTURES = frozenset({"x86", "x86_64", "arm", "arm64"})
 _MISSING = object()
+#: 补充证据失败时只记 debug 日志（默认不输出），不改变返回值与分析结果。
+_log = logging.getLogger(__name__)
 
 
 def _prepare_render(function: dict[str, Any], architecture: str, names: dict[Any, dict[int, str]],
@@ -248,7 +251,8 @@ def _argument_closure(result: Any, architecture: str, context: dict[str, Any],
             try:
                 thunks.update(resolve_thunk_targets(result, stubs))
             except Exception:
-                pass  # 只是补充证据
+                # 只是补充证据：失败时沿用已有桩证据，但记录下来以免掩盖链接解析缺陷。
+                _log.debug("resolve_thunk_targets 失败，忽略闭包内补充的导入桩证据", exc_info=True)
         for target in closure & thunks.keys():
             local = local_by_name.get(display_name(thunks[target]))
             if local is not None and local != target and target not in aliases:
@@ -277,6 +281,7 @@ def _argument_closure(result: Any, architecture: str, context: dict[str, Any],
         usage = argument_usage([by_start[start] for start in sorted(closure)], architecture, abi.arguments,
                                abi.volatile, known_arity=known, aliases=aliases, variadic_fixed=variadic)
     except Exception:
+        _log.debug("argument_usage 失败，保持原签名摘要", exc_info=True)
         return None  # 参数用法只是补充证据，失败时保持原摘要
     return abi, closure, usage, aliases
 
@@ -357,6 +362,7 @@ def _signature_summary(function: dict[str, Any], index: int, architecture: str, 
             # 符号的源码级名字（Mach-O 去掉前导下划线）用于调用处与函数签名。
             summary["name"] = function["display_name"]
     except Exception:
+        _log.debug("recover_signature 失败（函数下标 %s），不生成签名摘要", index, exc_info=True)
         return None  # Signature evidence is optional; never invent it on failure.
     return summary
 

@@ -501,6 +501,7 @@ def emulate_slice(instructions, branch_address, target_register, *, segments=(),
             try:
                 mu.hook_del(hook_id)
             except Exception:
+                # 尽力清理：output 已定稿，解除钩子失败不得在 finally 中覆盖仿真结果。
                 pass
     return output
 
