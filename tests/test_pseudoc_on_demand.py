@@ -34,6 +34,7 @@ from fangida.plugins.pseudoc.on_demand import (PseudocContext, generate_function
 from fangida.settings import Settings
 from tests import test_gui_workbench as gui_fixture
 from tests.test_pseudoc import function, instruction
+from tests._speed import slow
 
 LIBTERSAFE = Path("/Users/meow233/Downloads/libtersafe.so")
 CHALLENGE = Path("/Users/meow233/Downloads/project/dist/challenge")
@@ -543,6 +544,7 @@ class GuiGenerateTests(unittest.TestCase):
         self.assertIn("先打开", browser.status.get())
 
 
+@slow("真实样本按需伪 C")
 class RealSampleTests(unittest.TestCase):
     def test_challenge_on_demand_equals_pipeline(self):
         if not CHALLENGE.is_file():

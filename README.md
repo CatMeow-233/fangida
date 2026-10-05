@@ -530,6 +530,13 @@ fangida-bench /bin/ls --runs 3
 fangida-bench ./native_sample --runs 5 --compare-threads 2
 ```
 
+日常快速回归可设 `FANGIDA_QUICK_TESTS=1`，跳过 `tests/_speed.py` 中 `@slow`
+标记的真实样本全量扫描与编译运行硬件对照用例；CI 与提交前仍跑全量。
+
+```sh
+FANGIDA_QUICK_TESTS=1 python -m unittest discover -s . -p 'test_*.py'
+```
+
 `--compare-threads N` times one versus N native workers with warmups and
 alternating order, and checks whether evidence and analysis scope match. N
 must fit the configured `analyze_threads` budget with one slot for xref; a small sample may use only

@@ -30,6 +30,7 @@ from fangida.plugins.pseudoc import on_demand, pipeline
 from fangida.plugins.pseudoc.on_demand import PseudocContext
 from fangida.settings import Settings
 from tests.test_pseudoc import function, instruction
+from tests._speed import slow
 
 LIBTERSAFE = Path("/Users/meow233/Downloads/libtersafe.so")
 
@@ -386,6 +387,7 @@ class GuiQueueTests(unittest.TestCase):
 
 
 
+@slow("真实样本按需伪 C")
 class RealSampleTests(unittest.TestCase):
     """libtersafe.so（arm64 ELF）上审查给出的样例。"""
     result = None

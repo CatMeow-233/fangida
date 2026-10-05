@@ -26,6 +26,7 @@ from fangida.core.kkagent.noreturn import (import_noreturn, local_noreturn, nore
 from fangida.core.kkagent.semantic import _analyze_function, analyze_semantics
 from fangida.loaders.models import BinaryImage
 from fangida.xrefs import XrefStage
+from tests._speed import slow
 
 
 CAPSTONE = importlib.util.find_spec("capstone") is not None
@@ -509,6 +510,7 @@ class CompiledMachOTests(unittest.TestCase):
         self.assertGreaterEqual(stats["full_noreturn_rebuilt_functions"], 1)
 
 
+@slow("libtersafe 全量扫描")
 @unittest.skipUnless(CAPSTONE and LIBTERSAFE.is_file(), "libtersafe.so sample is not available")
 class LibtersafeSampleTests(unittest.TestCase):
     def test_import_stubs_and_truncated_callers(self):

@@ -32,6 +32,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests._speed import slow
 from tests.test_lifter_gaps import _rows
 from tests.test_pseudoc import function as fn
 from tests.test_pseudoc_compilable import (
@@ -482,6 +483,7 @@ class X86PipelineSemanticsTests(unittest.TestCase):
                                     lambda index: (functions[index // len(rows)][0], rows[index % len(rows)]))
                 self.assertIn("T", observed)  # 除数为 0 与商溢出确实陷入
 
+    @slow("编译运行硬件对照")
     @unittest.skipUnless(_can_run_x86(), "需要能编译运行 x86-64（x86-64 本机或 Rosetta 2）")
     def test_pipeline_matches_hardware(self):
         functions, rows = _pipeline_functions(), _pipeline_inputs()
@@ -587,6 +589,7 @@ class X86WideDivisionTests(unittest.TestCase):
                     self.assertNotIn("unresolved_operation", text)
                     self.assertRegex(text, rf"x86_{kind}_quo_{width}\(")
 
+    @slow("编译运行硬件对照")
     @unittest.skipUnless(_can_run_x86(), "需要能编译运行 x86-64（Rosetta/交叉工具链）")
     def test_wide_division_helpers_match_hardware(self):
         source = ("#define _XOPEN_SOURCE 700\n" + pseudoc_prelude()

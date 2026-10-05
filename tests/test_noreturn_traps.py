@@ -25,6 +25,7 @@ from fangida.core.kkagent.noreturn import (MAX_STUB_INSTRUCTIONS, deterministic_
 from fangida.core.kkagent.semantic import analyze_semantics
 from fangida.loaders.models import BinaryImage
 from fangida.xrefs import XrefStage
+from tests._speed import slow
 
 from tests.test_noreturn import addresses, by_start, instruction, run_full
 
@@ -433,6 +434,7 @@ class ChallengeLeanScanTests(LeanScanEquivalenceMixin, unittest.TestCase):
     sample = CHALLENGE
 
 
+@slow("libtersafe 全量扫描")
 @unittest.skipUnless(CAPSTONE and LIBTERSAFE.is_file(), "libtersafe.so sample is not available")
 class LibtersafeLeanScanTests(LeanScanEquivalenceMixin, unittest.TestCase):
     sample = LIBTERSAFE

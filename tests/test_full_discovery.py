@@ -49,6 +49,7 @@ from fangida.settings import Settings
 from fangida.xrefs import XrefStage
 from tests.test_elf_unwind import elf_file
 from tests.test_loader_code_regions import _macho
+from tests._speed import slow
 
 LIBTERSAFE = Path("/Users/meow233/Downloads/libtersafe.so")
 ANCHOR = 0x100   # 合成快照中的已知函数起点（表中的锚点项）
@@ -927,6 +928,7 @@ class Pe32SwitchTableEndToEndTests(unittest.TestCase):
                          {"start": 0x40104c, "pointer_address": 0x40102c, "reason": "slot_in_code"})
 
 
+@slow("libtersafe 全量发现")
 @unittest.skipUnless(DECODER_AVAILABLE and LIBTERSAFE.is_file(), "libtersafe.so sample is not available")
 class LibtersafeBranchTableTests(unittest.TestCase):
     """libtersafe：混淆函数 0x2f4e3c 的 br 分支表 [0x2f4e78, 0x2f4e80, 0x2f4e3c, 0x2f4e88]，

@@ -35,6 +35,7 @@ from fangida.processors.decoder import NativeDecoder
 from fangida.processors.full_decode import ANCHOR_RESYNC, stream_decode_regions
 from fangida.xrefs import XrefStage
 from tests.test_full_decode_processes import _small_pieces
+from tests._speed import slow
 
 CAPSTONE = importlib.util.find_spec("capstone") is not None
 BASE = 0x400000
@@ -465,6 +466,7 @@ def _thin_slice(path: str, directory: str) -> Path | None:
     return output if done.returncode == 0 and output.is_file() else None
 
 
+@slow("系统二进制切片全量解码")
 @unittest.skipUnless(CAPSTONE and platform.system() == "Darwin" and shutil.which("lipo")
                      and os.path.isfile("/bin/zsh") and os.path.isfile("/bin/bash"),
                      "Requires the x86_64 slices of /bin/zsh and /bin/bash on macOS")

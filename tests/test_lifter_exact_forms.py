@@ -36,6 +36,7 @@ from fangida.plugins.pseudoc.microcode.conditions import evaluate_condition
 from fangida.plugins.pseudoc.microcode.evaluate import integer_flags, logic_flags
 from tests.test_lifter_system_simd import _toolchain
 from tests.test_pseudoc_compilable import _Machine, _REGISTERS, _RETURN, _Unsupported, _syntax_check
+from tests._speed import slow
 
 _HAS_CAPSTONE = importlib.util.find_spec("capstone") is not None
 _BASE = 0x1000
@@ -634,6 +635,7 @@ class ExactFormMicrocodeTests(unittest.TestCase):
                 _syntax_check(pseudoc_prelude(output) + "\n" + output.pseudoc + "\n", "-Werror=int-conversion")
 
 
+@slow("逐条形式编译运行对照")
 @unittest.skipUnless(_HAS_CAPSTONE, "需要 Capstone")
 class ExactFormExecutionTests(unittest.TestCase):
     def _microcode(self, architecture, name, encoding, options, inputs):
