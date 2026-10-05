@@ -1,0 +1,177 @@
+# 完整配置模板：复制到 ~/.kkagent/config.toml 后按需取消注释。
+# 密钥也可通过 ANTHROPIC_API_KEY / OPENAI_API_KEY / KIMI_API_KEY / GOOGLE_API_KEY 提供。
+
+default_model = "local/default"
+# quality_model = "local/max"      # quality 档的目标模型；未配置时回退 default_model
+# balance_model = "local/fast"     # 中间档模型；未配置 [subagent.default_models] 时，子 Agent 回退到此模型
+# fast_model = "local/cheap"       # 符号 `fast` 的目标模型；未配置时回退 balance_model，再回退 default_model
+default_permission_mode = "manual" # manual | yolo | auto
+default_plan_mode = false
+merge_all_available_skills = false  # true 会把所有 Skill 正文加入初始上下文
+extra_skill_dirs = []               # 额外 Skill 根目录；相对路径基于启动工作目录
+# disabled_skills = []              # 或由 TUI /skills 写入 ~/.kkagent/disabled.toml
+# disabled_mcp_servers = []         # 或由 TUI /mcp 写入 ~/.kkagent/disabled.toml
+# plugin_marketplace = "https://plugins.example.com/marketplace.json"
+# plugin_marketplaces = [
+#   "http://10.10.10.205:8091/bjc/kk-plugins",
+#   { name = "team", source = "/data/kk-plugins/marketplace.json" },
+# ]
+telemetry = false
+# trusted_workspaces = ["/absolute/path/to/project"]
+
+# [plugins]
+# 插件 toolOverride 的扩展许可：默认仅低风险工具（Web/TaskOutput/Skill/
+# Cron/ReadMediaFile）可被覆盖；守卫工具（AskUserQuestion/EnterPlanMode/
+# ExitPlanMode/Goal）永不可覆盖。高危工具在此显式 opt-in 后才允许。
+# extra_overridable_tools = ["Bash"]   # 如 ["Bash", "Edit", "Write"]
+
+# 隐私伪装：中和会暴露真实来源的时区/语言信号。默认已是 UTC + en-US，无需配置。
+[privacy]
+timezone = "UTC"            # UTC（默认）| local | +HH:MM | -HH:MM；其它值安全回退 UTC
+locale = "en-US"
+force_shell_locale = true   # 强制把 TZ/LANG/LC_* 注入 Bash/沙箱子进程，shell 里也看不到真时区
+inject_current_time = false # 可选：把伪装后的当前时间注入系统提示词（对齐 Claude Code 行为）
+
+[providers.local]
+type = "anthropic"
+api_key = "sk-your-key-here"
+base_url = "http://127.0.0.1:3000"
+# custom_headers = { "X-Organization" = "example" }
+# first_token_timeout_ms = 30000  # provider 级首字超时；模型级可覆盖；0 禁用
+# request_timeout_ms = 600000     # 单请求总超时；不设置或 0 禁用（流式由首字超时 + 60s 逐读空闲超时兜底）
+
+[models."local/default"]
+provider = "local"
+model = "upstream-model-id"
+max_context_size = 262144
+max_output_size = 16384
+capabilities = ["tool_use", "image_in"]
+display_name = "Default coding model"
+# first_token_timeout_ms = 60000
+# support_efforts = ["low", "medium", "high"]  # GPT-5.6: ["none", "low", "medium", "high", "xhigh", "max"]
+# default_effort = "medium"                    # 必须列在 support_efforts 中（若非空）
+# Experimental Anthropic compatibility workarounds; disabled by default.
+# experimental_adaptive_thinking = true
+# experimental_visible_empty_retries = 1
+# experimental_bad_toolcall_auto_retries = 2
+
+# OpenAI Responses 示例
+# [providers.openai]
+# type = "openai-responses"
+# api_key = "sk-..."
+# base_url = "https://api.openai.com/v1"
+#
+# [models."openai/coding"]
+# provider = "openai"
+# model = "upstream-model-id"
+# max_context_size = 200000
+# max_output_size = 16384
+# capabilities = ["tool_use", "thinking"]
+
+# Kimi OAuth Provider 通常由 `kkagent auth login` 自动写入。
+# [providers.kimi]
+# type = "kimi"
+# base_url = "https://api.kimi.com/coding"
+# [providers.kimi.oauth]
+# storage = "file"
+# key = "kimi-code"
+# oauth_host = "https://auth.kimi.com"
+
+[loop_control]
+max_attempts_per_step = 10
+rate_limit_retry_base_seconds = 5 # 429 fallback: 5s, 10s, 20s...; Retry-After wins
+retry_base_seconds = 1 # other retryable failures: 1s, 2s, 4s... (32x cap); Retry-After wins
+reserved_context_size = 50000
+max_steps_per_turn = 0 # unset/0 means unlimited; positive values enforce a limit
+auto_compact = true
+compact_keep_last = 8
+token_counting = "measured+estimated" # measured+estimated | measured | estimated
+
+# [subagent]
+# max_depth = 2
+# max_concurrent = 4
+# 按子 Agent profile 配置默认模型（工具调用显式 model 优先）
+# 值可以是真实模型别名，或符号：current / default / fast / secondary
+# [subagent.default_models]
+# explore = "current"     # 跟随父会话当前模型
+# coder = "default"       # 使用顶层 default_model
+# general = "fast"        # fast_model → balance_model → default_model
+# fallback = "secondary"  # 未单独列出的 profile 回退
+
+[image]
+max_edge_px = 2000
+read_byte_budget = 262144
+
+[background]
+max_running_tasks = 4
+keep_alive_on_exit = false
+# bash_auto_background_on_timeout = true
+# bash_task_timeout_s = 120
+# approval_timeout_s = 900
+
+[sandbox]
+mode = "auto"       # auto | workspace | process | disabled
+network = true
+memory_mb = 4096
+cpu_seconds = 600
+max_processes = 128 # Windows Job Object only; Linux/macOS cannot enforce this per process tree
+# extra_read_paths = ["/absolute/read-only/input"]
+# extra_write_paths = ["/absolute/writable/cache"]
+
+# [thinking]
+# enabled = true
+# effort = "high"
+# keep = "all" # Provider 兼容字符串；不确定时省略
+
+# [[permission.rules]]
+# decision = "allow" # allow | deny | ask
+# pattern = "Read"
+# scope = "user"
+
+# [[hooks]]
+# event = "pre_tool_call"
+# matcher = "Bash"
+# command = "/absolute/path/to/check.sh"
+# timeout = 5
+
+# [services.web_search]
+# provider = "searxng" # searxng | brave | custom (see docs/configuration.md for wire formats)
+# base_url = "http://127.0.0.1:8080/search" # full search endpoint URL
+# api_key_env = "BRAVE_API_KEY" # preferred over inline api_key
+# timeout_ms = 15000
+# default_limit = 5
+# proxy = "auto" # auto | none | system; auto bypasses proxy for local/private endpoints
+#
+# [services.web_fetch]
+# base_url = "https://example.invalid/fetch" # optional proxy; FetchURL works without it
+# api_key_env = "WEB_FETCH_API_KEY"
+# timeout_ms = 30000
+# proxy = "auto" # same policy as web_search
+
+[server]
+idle_timeout_secs = 1800
+standalone = true
+
+# stdio MCP
+# [mcp_servers.filesystem]
+# type = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path"]
+# cwd = "/optional/working/directory"
+# env = { "LOG_LEVEL" = "warn" }
+# timeout_ms = 30000
+
+# 远程 MCP
+# [mcp_servers.remote]
+# type = "streamable-http" # sse | http | streamable-http
+# url = "https://mcp.example.com/mcp"
+# headers = { "Authorization" = "Bearer ..." }
+# timeout_ms = 30000
+#
+# [mcp_servers.remote.oauth]
+# enabled = true
+# client_id = "optional-static-client-id"
+# client_secret = "optional-static-client-secret"
+# scopes = ["tools.read", "tools.call"]
+# redirect_uri = "http://127.0.0.1:8765/callback"
+# client_label = "kkagent"

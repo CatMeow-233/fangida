@@ -1,0 +1,323 @@
+{
+  "source": "/Users/meow233/Downloads/project/dist/challenge",
+  "sha256": "223358017040ab6ed519b4ad8f5ff4f30a00a167f6e1a54238b2f266b7a85d55",
+  "size_bytes": 1239360,
+  "python": "3.13.2",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "measurement_scope": "cProfile attribution only; wall and phase times are perturbed; excludes evidence hashing and visible Tk rendering",
+  "profile_limitations": "Single decoder worker only. The full-analysis collector can observe xref work and waiting on CPython 3.13; this is not a per-thread CPU profile. Xref sampling uses a separate run; the two profiles cannot be added together.",
+  "decoder_workers": 1,
+  "analyze_threads_budget": 8,
+  "profiling_runs": [
+    {
+      "profiled_role": "analysis",
+      "instrumented_wall_seconds": 3.09264670900302,
+      "instrumented_phase_seconds": {
+        "disassembly": 2.185144875002152,
+        "xref": 0.1046217089970014,
+        "function_recovery": 0.014344540999445599,
+        "cfg": 0.7072922920051496,
+        "xref_index": 0.03359745799389202,
+        "total": 3.0542879170025117
+      },
+      "analysis_thread_ids": [
+        6153596928
+      ],
+      "xref_thread_ids": [
+        6170423296
+      ],
+      "separate_threads_verified": true,
+      "output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+      "matches_uninstrumented_baseline": true,
+      "matches_baseline_scope": true,
+      "coverage": {
+        "status": "partial",
+        "functions": 690,
+        "xrefs": 28913,
+        "scanned_bytes": 1239360,
+        "xref_kinds": {
+          "call": 18,
+          "data": 13973,
+          "jmp": 14922
+        },
+        "function_sources": {
+          "direct_call": 1,
+          "eh_frame": 685,
+          "executable_region": 2,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "cfg_functions": 690,
+        "cfg_blocks": 22694,
+        "cfg_frontiers": 5,
+        "complete_function_cfgs": 685,
+        "full_analysis": true,
+        "full_coverage": {
+          "enabled": true,
+          "scope": "all_file_backed_executable_regions",
+          "executable_bytes": 1000880,
+          "decoded_bytes": 1000880,
+          "decode_complete": true,
+          "instruction_count": 255974,
+          "unassigned_instructions": 5538,
+          "function_recovery_complete": false,
+          "regions": [
+            {
+              "name": ".init",
+              "address": 8192,
+              "offset": 8192,
+              "size": 23,
+              "file_backed_size": 23,
+              "decoded_bytes": 23,
+              "instruction_count": 7,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt",
+              "address": 8224,
+              "offset": 8224,
+              "size": 192,
+              "file_backed_size": 192,
+              "decoded_bytes": 192,
+              "instruction_count": 36,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt.got",
+              "address": 8416,
+              "offset": 8416,
+              "size": 8,
+              "file_backed_size": 8,
+              "decoded_bytes": 8,
+              "instruction_count": 2,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".text",
+              "address": 8432,
+              "offset": 8432,
+              "size": 1000648,
+              "file_backed_size": 1000648,
+              "decoded_bytes": 1000648,
+              "instruction_count": 255926,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".fini",
+              "address": 1009080,
+              "offset": 1009080,
+              "size": 9,
+              "file_backed_size": 9,
+              "decoded_bytes": 9,
+              "instruction_count": 3,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            }
+          ],
+          "xref_pass_complete": true,
+          "cfg_pass_complete": true,
+          "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+          "input_truncated": false
+        },
+        "full_instructions": 255974,
+        "full_decoded_bytes": 1000880,
+        "full_executable_bytes": 1000880,
+        "full_decode_complete": true,
+        "full_cfg_functions": 690,
+        "full_unassigned_instructions": 5538,
+        "full_function_sources": {
+          "executable_region": 2,
+          "eh_frame": 685,
+          "direct_call": 1,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "semantic_functions": 690,
+        "semantic_pending_symbols": null,
+        "semantic_instructions": 250436,
+        "semantic_partial_functions": 5,
+        "semantic_budget_exhausted": false,
+        "semantic_decoder": "capstone",
+        "semantic_cancelled": false,
+        "semantic_workers_requested": 1,
+        "semantic_workers_used": 1,
+        "semantic_parallel_functions": 0
+      }
+    },
+    {
+      "profiled_role": "xref",
+      "instrumented_wall_seconds": 1.6105286669990164,
+      "instrumented_phase_seconds": {
+        "disassembly": 1.1758804589990177,
+        "xref": 0.10072429200226907,
+        "function_recovery": 0.004881000000750646,
+        "cfg": 0.27073429099982604,
+        "xref_index": 0.03162395799881779,
+        "total": 1.5934415840019938
+      },
+      "analysis_thread_ids": [
+        6153596928
+      ],
+      "xref_thread_ids": [
+        6170423296
+      ],
+      "separate_threads_verified": true,
+      "output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+      "matches_uninstrumented_baseline": true,
+      "matches_baseline_scope": true,
+      "coverage": {
+        "status": "partial",
+        "functions": 690,
+        "xrefs": 28913,
+        "scanned_bytes": 1239360,
+        "xref_kinds": {
+          "call": 18,
+          "data": 13973,
+          "jmp": 14922
+        },
+        "function_sources": {
+          "direct_call": 1,
+          "eh_frame": 685,
+          "executable_region": 2,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "cfg_functions": 690,
+        "cfg_blocks": 22694,
+        "cfg_frontiers": 5,
+        "complete_function_cfgs": 685,
+        "full_analysis": true,
+        "full_coverage": {
+          "enabled": true,
+          "scope": "all_file_backed_executable_regions",
+          "executable_bytes": 1000880,
+          "decoded_bytes": 1000880,
+          "decode_complete": true,
+          "instruction_count": 255974,
+          "unassigned_instructions": 5538,
+          "function_recovery_complete": false,
+          "regions": [
+            {
+              "name": ".init",
+              "address": 8192,
+              "offset": 8192,
+              "size": 23,
+              "file_backed_size": 23,
+              "decoded_bytes": 23,
+              "instruction_count": 7,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt",
+              "address": 8224,
+              "offset": 8224,
+              "size": 192,
+              "file_backed_size": 192,
+              "decoded_bytes": 192,
+              "instruction_count": 36,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt.got",
+              "address": 8416,
+              "offset": 8416,
+              "size": 8,
+              "file_backed_size": 8,
+              "decoded_bytes": 8,
+              "instruction_count": 2,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".text",
+              "address": 8432,
+              "offset": 8432,
+              "size": 1000648,
+              "file_backed_size": 1000648,
+              "decoded_bytes": 1000648,
+              "instruction_count": 255926,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".fini",
+              "address": 1009080,
+              "offset": 1009080,
+              "size": 9,
+              "file_backed_size": 9,
+              "decoded_bytes": 9,
+              "instruction_count": 3,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            }
+          ],
+          "xref_pass_complete": true,
+          "cfg_pass_complete": true,
+          "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+          "input_truncated": false
+        },
+        "full_instructions": 255974,
+        "full_decoded_bytes": 1000880,
+        "full_executable_bytes": 1000880,
+        "full_decode_complete": true,
+        "full_cfg_functions": 690,
+        "full_unassigned_instructions": 5538,
+        "full_function_sources": {
+          "executable_region": 2,
+          "eh_frame": 685,
+          "direct_call": 1,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "semantic_functions": 690,
+        "semantic_pending_symbols": null,
+        "semantic_instructions": 250436,
+        "semantic_partial_functions": 5,
+        "semantic_budget_exhausted": false,
+        "semantic_decoder": "capstone",
+        "semantic_cancelled": false,
+        "semantic_workers_requested": 1,
+        "semantic_workers_used": 1,
+        "semantic_parallel_functions": 0
+      }
+    }
+  ],
+  "analysis_profile": "/Users/meow233/Desktop/ai/fangida-0.4.0/benchmark-results/bottleneck-analyzer-profile-2026-09-30.analysis.txt",
+  "xref_profile": "/Users/meow233/Desktop/ai/fangida-0.4.0/benchmark-results/bottleneck-analyzer-profile-2026-09-30.xref.txt"
+}

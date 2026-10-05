@@ -1,0 +1,1367 @@
+{
+  "name": "tp2_dec_tss_info",
+  "start": 1851552,
+  "size": 144,
+  "source": "dynsym",
+  "blocks": [
+    {
+      "start": 1851552,
+      "instructions": [
+        {
+          "addr": 1851552,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x29",
+            "x30",
+            "[sp",
+            "#-0x30]!"
+          ],
+          "reads": [
+            "fp",
+            "lr",
+            "sp"
+          ],
+          "writes": [
+            "sp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851556,
+          "size": 4,
+          "mnemonic": "str",
+          "operands": [
+            "x21",
+            "[sp",
+            "#0x10]"
+          ],
+          "reads": [
+            "x21",
+            "sp"
+          ],
+          "writes": [],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851560,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x20",
+            "x19",
+            "[sp",
+            "#0x20]"
+          ],
+          "reads": [
+            "x20",
+            "x19",
+            "sp"
+          ],
+          "writes": [],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851564,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x29",
+            "sp"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "fp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851568,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x19",
+            "x2"
+          ],
+          "reads": [
+            "x2"
+          ],
+          "writes": [
+            "x19"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851572,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x20",
+            "x1"
+          ],
+          "reads": [
+            "x1"
+          ],
+          "writes": [
+            "x20"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851576,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x21",
+            "x0"
+          ],
+          "reads": [
+            "x0"
+          ],
+          "writes": [
+            "x21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851580,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x2dad4c"
+          ],
+          "reads": [],
+          "writes": [
+            "lr"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 2993484,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1851584,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "w8",
+            "[x0",
+            "#0x3ac]"
+          ],
+          "reads": [
+            "x0"
+          ],
+          "writes": [
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851588,
+          "size": 4,
+          "mnemonic": "cbz",
+          "operands": [
+            "w8",
+            "#0x1c4114"
+          ],
+          "reads": [
+            "nzcv",
+            "w8"
+          ],
+          "writes": [],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1851668,
+            "conditional": true
+          }
+        }
+      ],
+      "successors": [
+        1851592,
+        1851668
+      ]
+    },
+    {
+      "start": 1851592,
+      "instructions": [
+        {
+          "addr": 1851592,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x1",
+            "#0x1c40bc"
+          ],
+          "reads": [],
+          "writes": [
+            "x1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851596,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x2",
+            "#0x1c40bc"
+          ],
+          "reads": [],
+          "writes": [
+            "x2"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851600,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x3",
+            "#0x1c40b4"
+          ],
+          "reads": [],
+          "writes": [
+            "x3"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851604,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x4",
+            "#0x1c40a8"
+          ],
+          "reads": [],
+          "writes": [
+            "x4"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851608,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x5",
+            "#0x1c409c"
+          ],
+          "reads": [],
+          "writes": [
+            "x5"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851612,
+          "size": 4,
+          "mnemonic": "add",
+          "operands": [
+            "sp",
+            "sp",
+            "#0x110"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "sp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851616,
+          "size": 4,
+          "mnemonic": "blr",
+          "operands": [
+            "x6"
+          ],
+          "reads": [
+            "x6"
+          ],
+          "writes": [
+            "lr"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": null,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1851620,
+          "size": 4,
+          "mnemonic": "add",
+          "operands": [
+            "sp",
+            "sp",
+            "#0x100"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "sp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851624,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x1",
+            "x2",
+            "[sp]"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "x1",
+            "x2"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851628,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x3",
+            "x4",
+            "[sp",
+            "#0x10]"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "x3",
+            "x4"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851632,
+          "size": 4,
+          "mnemonic": "svc",
+          "operands": [
+            "#0"
+          ],
+          "reads": [],
+          "writes": [
+            "lr"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851636,
+          "size": 4,
+          "mnemonic": "str",
+          "operands": [
+            "w1",
+            "[sp",
+            "#0x10]"
+          ],
+          "reads": [
+            "w1",
+            "sp"
+          ],
+          "writes": [],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851640,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x5",
+            "x6",
+            "[sp",
+            "#0x30]"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "x5",
+            "x6"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851644,
+          "size": 4,
+          "mnemonic": "and",
+          "operands": [
+            "x5",
+            "x6",
+            "#3"
+          ],
+          "reads": [
+            "x6"
+          ],
+          "writes": [
+            "x5"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851648,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x1",
+            "#0x1c412c"
+          ],
+          "reads": [],
+          "writes": [
+            "x1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851652,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x2",
+            "#0x1c4134"
+          ],
+          "reads": [],
+          "writes": [
+            "x2"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851656,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x3",
+            "#0x1c413c"
+          ],
+          "reads": [],
+          "writes": [
+            "x3"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851660,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x4",
+            "#0x1c4144"
+          ],
+          "reads": [],
+          "writes": [
+            "x4"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851664,
+          "size": 4,
+          "mnemonic": "br",
+          "operands": [
+            "x5"
+          ],
+          "reads": [
+            "x5"
+          ],
+          "writes": [],
+          "branch_info": {
+            "kind": "jump",
+            "target": null,
+            "conditional": false
+          }
+        }
+      ],
+      "successors": []
+    },
+    {
+      "start": 1851668,
+      "instructions": [
+        {
+          "addr": 1851668,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x0",
+            "x21"
+          ],
+          "reads": [
+            "x21"
+          ],
+          "writes": [
+            "x0"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851672,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x1",
+            "x20"
+          ],
+          "reads": [
+            "x20"
+          ],
+          "writes": [
+            "x1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851676,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x2",
+            "x19"
+          ],
+          "reads": [
+            "x19"
+          ],
+          "writes": [
+            "x2"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851680,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x20",
+            "x19",
+            "[sp",
+            "#0x20]"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "x20",
+            "x19"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851684,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "x21",
+            "[sp",
+            "#0x10]"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "x21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851688,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x29",
+            "x30",
+            "[sp]",
+            "#0x30"
+          ],
+          "reads": [
+            "sp"
+          ],
+          "writes": [
+            "fp",
+            "lr",
+            "sp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1851692,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x50e1b0"
+          ],
+          "reads": [],
+          "writes": [],
+          "branch_info": {
+            "kind": "jump",
+            "target": 5300656,
+            "conditional": false
+          }
+        }
+      ],
+      "successors": []
+    }
+  ],
+  "cfg": {
+    "scope": "bounded_entry_window",
+    "entry": 1851552,
+    "window_end": 1851696,
+    "complete": false,
+    "boundary_known": false,
+    "blocks": [
+      {
+        "start": 1851552,
+        "instructions": [
+          {
+            "addr": 1851552,
+            "size": 4,
+            "mnemonic": "stp",
+            "operands": [
+              "x29",
+              "x30",
+              "[sp",
+              "#-0x30]!"
+            ],
+            "reads": [
+              "fp",
+              "lr",
+              "sp"
+            ],
+            "writes": [
+              "sp"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851556,
+            "size": 4,
+            "mnemonic": "str",
+            "operands": [
+              "x21",
+              "[sp",
+              "#0x10]"
+            ],
+            "reads": [
+              "x21",
+              "sp"
+            ],
+            "writes": [],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851560,
+            "size": 4,
+            "mnemonic": "stp",
+            "operands": [
+              "x20",
+              "x19",
+              "[sp",
+              "#0x20]"
+            ],
+            "reads": [
+              "x20",
+              "x19",
+              "sp"
+            ],
+            "writes": [],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851564,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x29",
+              "sp"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "fp"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851568,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x19",
+              "x2"
+            ],
+            "reads": [
+              "x2"
+            ],
+            "writes": [
+              "x19"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851572,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x20",
+              "x1"
+            ],
+            "reads": [
+              "x1"
+            ],
+            "writes": [
+              "x20"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851576,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x21",
+              "x0"
+            ],
+            "reads": [
+              "x0"
+            ],
+            "writes": [
+              "x21"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851580,
+            "size": 4,
+            "mnemonic": "bl",
+            "operands": [
+              "#0x2dad4c"
+            ],
+            "reads": [],
+            "writes": [
+              "lr"
+            ],
+            "branch_info": {
+              "kind": "call",
+              "target": 2993484,
+              "conditional": false
+            }
+          },
+          {
+            "addr": 1851584,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "w8",
+              "[x0",
+              "#0x3ac]"
+            ],
+            "reads": [
+              "x0"
+            ],
+            "writes": [
+              "w8"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851588,
+            "size": 4,
+            "mnemonic": "cbz",
+            "operands": [
+              "w8",
+              "#0x1c4114"
+            ],
+            "reads": [
+              "nzcv",
+              "w8"
+            ],
+            "writes": [],
+            "branch_info": {
+              "kind": "jump",
+              "target": 1851668,
+              "conditional": true
+            }
+          }
+        ],
+        "successors": [
+          1851592,
+          1851668
+        ]
+      },
+      {
+        "start": 1851592,
+        "instructions": [
+          {
+            "addr": 1851592,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x1",
+              "#0x1c40bc"
+            ],
+            "reads": [],
+            "writes": [
+              "x1"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851596,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x2",
+              "#0x1c40bc"
+            ],
+            "reads": [],
+            "writes": [
+              "x2"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851600,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x3",
+              "#0x1c40b4"
+            ],
+            "reads": [],
+            "writes": [
+              "x3"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851604,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x4",
+              "#0x1c40a8"
+            ],
+            "reads": [],
+            "writes": [
+              "x4"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851608,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x5",
+              "#0x1c409c"
+            ],
+            "reads": [],
+            "writes": [
+              "x5"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851612,
+            "size": 4,
+            "mnemonic": "add",
+            "operands": [
+              "sp",
+              "sp",
+              "#0x110"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "sp"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851616,
+            "size": 4,
+            "mnemonic": "blr",
+            "operands": [
+              "x6"
+            ],
+            "reads": [
+              "x6"
+            ],
+            "writes": [
+              "lr"
+            ],
+            "branch_info": {
+              "kind": "call",
+              "target": null,
+              "conditional": false
+            }
+          },
+          {
+            "addr": 1851620,
+            "size": 4,
+            "mnemonic": "add",
+            "operands": [
+              "sp",
+              "sp",
+              "#0x100"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "sp"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851624,
+            "size": 4,
+            "mnemonic": "ldp",
+            "operands": [
+              "x1",
+              "x2",
+              "[sp]"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "x1",
+              "x2"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851628,
+            "size": 4,
+            "mnemonic": "ldp",
+            "operands": [
+              "x3",
+              "x4",
+              "[sp",
+              "#0x10]"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "x3",
+              "x4"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851632,
+            "size": 4,
+            "mnemonic": "svc",
+            "operands": [
+              "#0"
+            ],
+            "reads": [],
+            "writes": [
+              "lr"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851636,
+            "size": 4,
+            "mnemonic": "str",
+            "operands": [
+              "w1",
+              "[sp",
+              "#0x10]"
+            ],
+            "reads": [
+              "w1",
+              "sp"
+            ],
+            "writes": [],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851640,
+            "size": 4,
+            "mnemonic": "ldp",
+            "operands": [
+              "x5",
+              "x6",
+              "[sp",
+              "#0x30]"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "x5",
+              "x6"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851644,
+            "size": 4,
+            "mnemonic": "and",
+            "operands": [
+              "x5",
+              "x6",
+              "#3"
+            ],
+            "reads": [
+              "x6"
+            ],
+            "writes": [
+              "x5"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851648,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x1",
+              "#0x1c412c"
+            ],
+            "reads": [],
+            "writes": [
+              "x1"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851652,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x2",
+              "#0x1c4134"
+            ],
+            "reads": [],
+            "writes": [
+              "x2"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851656,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x3",
+              "#0x1c413c"
+            ],
+            "reads": [],
+            "writes": [
+              "x3"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851660,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x4",
+              "#0x1c4144"
+            ],
+            "reads": [],
+            "writes": [
+              "x4"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851664,
+            "size": 4,
+            "mnemonic": "br",
+            "operands": [
+              "x5"
+            ],
+            "reads": [
+              "x5"
+            ],
+            "writes": [],
+            "branch_info": {
+              "kind": "jump",
+              "target": null,
+              "conditional": false
+            }
+          }
+        ],
+        "successors": []
+      },
+      {
+        "start": 1851668,
+        "instructions": [
+          {
+            "addr": 1851668,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x0",
+              "x21"
+            ],
+            "reads": [
+              "x21"
+            ],
+            "writes": [
+              "x0"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851672,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x1",
+              "x20"
+            ],
+            "reads": [
+              "x20"
+            ],
+            "writes": [
+              "x1"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851676,
+            "size": 4,
+            "mnemonic": "mov",
+            "operands": [
+              "x2",
+              "x19"
+            ],
+            "reads": [
+              "x19"
+            ],
+            "writes": [
+              "x2"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851680,
+            "size": 4,
+            "mnemonic": "ldp",
+            "operands": [
+              "x20",
+              "x19",
+              "[sp",
+              "#0x20]"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "x20",
+              "x19"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851684,
+            "size": 4,
+            "mnemonic": "ldr",
+            "operands": [
+              "x21",
+              "[sp",
+              "#0x10]"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "x21"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851688,
+            "size": 4,
+            "mnemonic": "ldp",
+            "operands": [
+              "x29",
+              "x30",
+              "[sp]",
+              "#0x30"
+            ],
+            "reads": [
+              "sp"
+            ],
+            "writes": [
+              "fp",
+              "lr",
+              "sp"
+            ],
+            "branch_info": {}
+          },
+          {
+            "addr": 1851692,
+            "size": 4,
+            "mnemonic": "b",
+            "operands": [
+              "#0x50e1b0"
+            ],
+            "reads": [],
+            "writes": [],
+            "branch_info": {
+              "kind": "jump",
+              "target": 5300656,
+              "conditional": false
+            }
+          }
+        ],
+        "successors": []
+      }
+    ],
+    "edges": [
+      {
+        "src": 1851588,
+        "dst": 1851668,
+        "kind": "branch"
+      },
+      {
+        "src": 1851588,
+        "dst": 1851592,
+        "kind": "fallthrough"
+      }
+    ],
+    "frontier": [
+      {
+        "from": 1851692,
+        "to": 5300656,
+        "reason": "outside_window"
+      },
+      {
+        "from": 1851664,
+        "to": null,
+        "reason": "indirect_jump"
+      }
+    ],
+    "assumptions": [
+      "Calls may return to the next instruction"
+    ]
+  },
+  "pseudoc_context": {
+    "kind": "elf",
+    "callees": {
+      "2993484": {
+        "name": "function_2dad4c",
+        "parameters": [],
+        "return_type": "uint64_t",
+        "signature_complete": false,
+        "argument_uses_complete": false,
+        "evidence": {
+          "source": "complete_observed_entry_to_return_instruction_snapshot",
+          "global_object_slot": 5650232,
+          "once_control_address": 5650240,
+          "initialization_callback_address": 2993572,
+          "allocation_size": 2480,
+          "return_definition": 2993556,
+          "return_instruction": 2993568,
+          "return_width_bits": 64,
+          "return_pointer_candidate": true,
+          "pointee_type": "unknown",
+          "limitation": "No explicit entry argument-register reads; callees do not have complete prototypes. Boundary is an observed RET, not a symbol boundary."
+        }
+      },
+      "1839496": {
+        "name": "tss_sdk_dec_tss_info",
+        "parameters": [
+          {
+            "register": "x0",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839576
+          },
+          {
+            "register": "x1",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839572
+          },
+          {
+            "register": "x2",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839568
+          }
+        ],
+        "return_type": "uint32_t",
+        "return_zero_extended": true,
+        "signature_complete": false,
+        "argument_uses_complete": false,
+        "evidence": {
+          "source": "complete_dynamic_symbol_instruction_snapshot",
+          "entry_argument_registers_explicit": [
+            "x0",
+            "x1",
+            "x2"
+          ],
+          "return_definition": 1840548,
+          "return_instruction": 1840580,
+          "return_signedness": "unknown",
+          "parameter_memory_read_only": "unknown_due_to_callee_effects",
+          "limitation": "Explicit register uses and machine result width are proven; complete ABI prototype and hidden argument forwarding are not."
+        }
+      },
+      "5300656": {
+        "name": "tss_sdk_dec_tss_info",
+        "parameters": [
+          {
+            "register": "x0",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839576
+          },
+          {
+            "register": "x1",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839572
+          },
+          {
+            "register": "x2",
+            "type": "uint64_t",
+            "evidence": "explicit_entry_read_before_definition",
+            "first_read_address": 1839568
+          }
+        ],
+        "return_type": "uint32_t",
+        "return_zero_extended": true,
+        "signature_complete": false,
+        "argument_uses_complete": false,
+        "evidence": {
+          "source": "complete_dynamic_symbol_instruction_snapshot",
+          "entry_argument_registers_explicit": [
+            "x0",
+            "x1",
+            "x2"
+          ],
+          "return_definition": 1840548,
+          "return_instruction": 1840580,
+          "return_signedness": "unknown",
+          "parameter_memory_read_only": "unknown_due_to_callee_effects",
+          "limitation": "Explicit register uses and machine result width are proven; complete ABI prototype and hidden argument forwarding are not."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,3212 @@
+{
+  "name": "tss_unity_is_enable",
+  "start": 1801464,
+  "size": 1020,
+  "cfg": {
+    "complete": true,
+    "frontier": []
+  },
+  "blocks": [
+    {
+      "start": 1801464,
+      "instructions": [
+        {
+          "addr": 1801464,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x29",
+            "x30",
+            "[sp",
+            "#-0x60]!"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801468,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x28",
+            "x27",
+            "[sp",
+            "#0x10]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801472,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x26",
+            "x25",
+            "[sp",
+            "#0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801476,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x24",
+            "x23",
+            "[sp",
+            "#0x30]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801480,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x22",
+            "x21",
+            "[sp",
+            "#0x40]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801484,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "x20",
+            "x19",
+            "[sp",
+            "#0x50]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801488,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x29",
+            "sp"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801492,
+          "size": 4,
+          "mnemonic": "sub",
+          "operands": [
+            "sp",
+            "sp",
+            "#0x40"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801496,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x1c8f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801500,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w23",
+            "#0xe1fd"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801504,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w21",
+            "#0x78d7"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801508,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x6a9c",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801512,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w23",
+            "#0x43cb",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801516,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w24",
+            "#0x1775"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801520,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w26",
+            "#0xf377"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801524,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w27",
+            "#0xefb3"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801528,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x20",
+            "x0"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801532,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w21",
+            "#0xb3d6",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801536,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w24",
+            "#0x8f38",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801540,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801544,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w26",
+            "#0x6b6f",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801548,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w27",
+            "#0x39d0",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801552,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w1",
+            "[x29",
+            "#-0x38]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801556,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801560,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7d68"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801576,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801564,
+      "instructions": [
+        {
+          "addr": 1801564,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w19",
+            "#0x1c8f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801568,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w19",
+            "#0x6a9c",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801572,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b8000"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802240,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801576,
+      "instructions": [
+        {
+          "addr": 1801576,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801580,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7d84"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801604,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801584,
+      "instructions": [
+        {
+          "addr": 1801584,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w19",
+            "#0x1c8f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801588,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801592,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w19",
+            "#0x6a9c",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801596,
+          "size": 4,
+          "mnemonic": "b.lt",
+          "operands": [
+            "#0x1b7fa0"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802144,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801600,
+      "instructions": [
+        {
+          "addr": 1801600,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7ff8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802232,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801604,
+      "instructions": [
+        {
+          "addr": 1801604,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x8d65"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801608,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w19",
+            "#0x1c8f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801612,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0x7eae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801616,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w19",
+            "#0x6a9c",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        }
+      ]
+    },
+    {
+      "start": 1801620,
+      "instructions": [
+        {
+          "addr": 1801620,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w9"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801624,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7f00"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801984,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801628,
+      "instructions": [
+        {
+          "addr": 1801628,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801632,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801636,
+      "instructions": [
+        {
+          "addr": 1801636,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7edc"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801948,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801640,
+      "instructions": [
+        {
+          "addr": 1801640,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801644,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7dc4"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801668,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801648,
+      "instructions": [
+        {
+          "addr": 1801648,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801652,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7de0"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801696,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801656,
+      "instructions": [
+        {
+          "addr": 1801656,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w24"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801660,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801664,
+      "instructions": [
+        {
+          "addr": 1801664,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7e20"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801760,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801668,
+      "instructions": [
+        {
+          "addr": 1801668,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801672,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7df4"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801716,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801676,
+      "instructions": [
+        {
+          "addr": 1801676,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w19"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801680,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7e08"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801736,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801684,
+      "instructions": [
+        {
+          "addr": 1801684,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801688,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801692,
+      "instructions": [
+        {
+          "addr": 1801692,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7fa8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802152,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801696,
+      "instructions": [
+        {
+          "addr": 1801696,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w27"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801700,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7e10"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801744,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801704,
+      "instructions": [
+        {
+          "addr": 1801704,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801708,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801712,
+      "instructions": [
+        {
+          "addr": 1801712,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b80b4"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802420,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801716,
+      "instructions": [
+        {
+          "addr": 1801716,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w9"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801720,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7e18"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801752,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801724,
+      "instructions": [
+        {
+          "addr": 1801724,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801728,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801732,
+      "instructions": [
+        {
+          "addr": 1801732,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7edc"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801948,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801736,
+      "instructions": [
+        {
+          "addr": 1801736,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801740,
+      "instructions": [
+        {
+          "addr": 1801740,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f20"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802016,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801744,
+      "instructions": [
+        {
+          "addr": 1801744,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801748,
+      "instructions": [
+        {
+          "addr": 1801748,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b8014"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802260,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801752,
+      "instructions": [
+        {
+          "addr": 1801752,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801756,
+      "instructions": [
+        {
+          "addr": 1801756,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f04"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801988,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801760,
+      "instructions": [
+        {
+          "addr": 1801760,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w25",
+            "#0xcdd0"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801764,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w22",
+            "#0x2c2d"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801768,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w28",
+            "#0xe1fd"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801772,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w25",
+            "#0x179a",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801776,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w22",
+            "#0x5451",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801780,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w28",
+            "#0x43cb",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        }
+      ]
+    },
+    {
+      "start": 1801784,
+      "instructions": [
+        {
+          "addr": 1801784,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x0",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801788,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x2",
+            "[x29",
+            "#-0x10]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801792,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x3",
+            "#0x1a"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801796,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x1",
+            "x20"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801800,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "x3",
+            "#1",
+            "lsl #32"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801804,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x50e020"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 5300256,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1801808,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x22d820"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 2283552,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1801812,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x1",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801816,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w2",
+            "wzr"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801820,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w3",
+            "#1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801824,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x22da98"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 2284184,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1801828,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801832,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x18]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801836,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w23",
+            "w28"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801840,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x18]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801844,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "w22",
+            "w25",
+            "[x29",
+            "#-0x34]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801848,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w28",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801852,
+          "size": 4,
+          "mnemonic": "b.le",
+          "operands": [
+            "#0x1b7e94"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801876,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801856,
+      "instructions": [
+        {
+          "addr": 1801856,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801860,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7eb0"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801904,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801864,
+      "instructions": [
+        {
+          "addr": 1801864,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w24"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801868,
+          "size": 4,
+          "mnemonic": "b.eq",
+          "operands": [
+            "#0x1b7e38"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801784,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801872,
+      "instructions": [
+        {
+          "addr": 1801872,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801876,
+      "instructions": [
+        {
+          "addr": 1801876,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801880,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7ec4"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801924,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801884,
+      "instructions": [
+        {
+          "addr": 1801884,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w19"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801888,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7ff8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802232,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801892,
+      "instructions": [
+        {
+          "addr": 1801892,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801896,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801900,
+      "instructions": [
+        {
+          "addr": 1801900,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7fa8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802152,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801904,
+      "instructions": [
+        {
+          "addr": 1801904,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w27"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801908,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b8010"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802256,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801912,
+      "instructions": [
+        {
+          "addr": 1801912,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801916,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801920,
+      "instructions": [
+        {
+          "addr": 1801920,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b80b4"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802420,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801924,
+      "instructions": [
+        {
+          "addr": 1801924,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x8d65"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801928,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x7eae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801932,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801936,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7f00"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801984,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801940,
+      "instructions": [
+        {
+          "addr": 1801940,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w28",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801944,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801948,
+      "instructions": [
+        {
+          "addr": 1801948,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "w0",
+            "[x29",
+            "#-4]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801952,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "sp",
+            "x29"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801956,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x20",
+            "x19",
+            "[sp",
+            "#0x50]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801960,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x22",
+            "x21",
+            "[sp",
+            "#0x40]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801964,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x24",
+            "x23",
+            "[sp",
+            "#0x30]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801968,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x26",
+            "x25",
+            "[sp",
+            "#0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801972,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x28",
+            "x27",
+            "[sp",
+            "#0x10]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801976,
+          "size": 4,
+          "mnemonic": "ldp",
+          "operands": [
+            "x29",
+            "x30",
+            "[sp]",
+            "#0x60"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801980,
+          "size": 4,
+          "mnemonic": "ret",
+          "operands": [],
+          "branch_info": {
+            "kind": "return",
+            "target": null,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801984,
+      "instructions": [
+        {
+          "addr": 1801984,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1801988,
+      "instructions": [
+        {
+          "addr": 1801988,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x911d"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801992,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w10",
+            "#0xe9ca"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1801996,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x78d7"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802000,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0xe024",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802004,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w10",
+            "#0x53f2",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802008,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0xb3d6",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802012,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f74"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802100,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802016,
+      "instructions": [
+        {
+          "addr": 1802016,
+          "size": 4,
+          "mnemonic": "sub",
+          "operands": [
+            "x8",
+            "sp",
+            "#0x40"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802020,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "sp",
+            "x8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802024,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802028,
+          "size": 4,
+          "mnemonic": "sub",
+          "operands": [
+            "x8",
+            "sp",
+            "#0x10"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802032,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "sp",
+            "x8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802036,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802040,
+          "size": 4,
+          "mnemonic": "sub",
+          "operands": [
+            "x8",
+            "sp",
+            "#0x10"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802044,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "sp",
+            "x8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802048,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x18]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802052,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x4851"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802056,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0xa7e2"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802060,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0xeeae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802064,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0xd77e",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802068,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "w9",
+            "w8",
+            "[x29",
+            "#-0x34]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802072,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0xefb3"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802076,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x39d0",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802080,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        }
+      ]
+    },
+    {
+      "start": 1802084,
+      "instructions": [
+        {
+          "addr": 1802084,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802088,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x8d65"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802092,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0x7eae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802096,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7da8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801640,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802100,
+      "instructions": [
+        {
+          "addr": 1802100,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "w10",
+            "w9",
+            "[x29",
+            "#-0x34]"
+          ],
+          "branch_info": {}
+        }
+      ]
+    },
+    {
+      "start": 1802104,
+      "instructions": [
+        {
+          "addr": 1802104,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w23",
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802108,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802112,
+          "size": 4,
+          "mnemonic": "b.gt",
+          "operands": [
+            "#0x1b8000"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802240,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802116,
+      "instructions": [
+        {
+          "addr": 1802116,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w26"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802120,
+          "size": 4,
+          "mnemonic": "b.lt",
+          "operands": [
+            "#0x1b7f98"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802136,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802124,
+      "instructions": [
+        {
+          "addr": 1802124,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x8d65"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802128,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0x7eae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802132,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7d94"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801620,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802136,
+      "instructions": [
+        {
+          "addr": 1802136,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w19"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802140,
+          "size": 4,
+          "mnemonic": "b.ge",
+          "operands": [
+            "#0x1b7ff8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802232,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802144,
+      "instructions": [
+        {
+          "addr": 1802144,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802148,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802152,
+      "instructions": [
+        {
+          "addr": 1802152,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x0",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802156,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x2",
+            "[x29",
+            "#-0x10]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802160,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "x1",
+            "x20"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802164,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w3",
+            "#0x40"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802168,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x50e020"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 5300256,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1802172,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x22d820"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 2283552,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1802176,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x1",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802180,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w2",
+            "wzr"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802184,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w3",
+            "#1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802188,
+          "size": 4,
+          "mnemonic": "bl",
+          "operands": [
+            "#0x22da98"
+          ],
+          "branch_info": {
+            "kind": "call",
+            "target": 2284184,
+            "conditional": false
+          }
+        },
+        {
+          "addr": 1802192,
+          "size": 4,
+          "mnemonic": "and",
+          "operands": [
+            "w8",
+            "w0",
+            "#1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802196,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0xec9c"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802200,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w10",
+            "#0x1feb"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802204,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-4]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802208,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0xf377"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802212,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0xc21e",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802216,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x11",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802220,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w10",
+            "#0xa971",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802224,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x6b6f",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802228,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f74"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802100,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802232,
+      "instructions": [
+        {
+          "addr": 1802232,
+          "size": 4,
+          "mnemonic": "b.eq",
+          "operands": [
+            "#0x1b7f20"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802016,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802236,
+      "instructions": [
+        {
+          "addr": 1802236,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802240,
+      "instructions": [
+        {
+          "addr": 1802240,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802244,
+          "size": 4,
+          "mnemonic": "b.lt",
+          "operands": [
+            "#0x1b80e8"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802472,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802248,
+      "instructions": [
+        {
+          "addr": 1802248,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w27"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802252,
+          "size": 4,
+          "mnemonic": "b.lt",
+          "operands": [
+            "#0x1b80ac"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802412,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802256,
+      "instructions": [
+        {
+          "addr": 1802256,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802260,
+      "instructions": [
+        {
+          "addr": 1802260,
+          "size": 4,
+          "mnemonic": "movi",
+          "operands": [
+            "v0.2d",
+            "#0000000000000000"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802264,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802268,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x576b"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802272,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x28]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802276,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w10",
+            "#0xb864"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802280,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "q0",
+            "q0",
+            "[x8]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802284,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "q0",
+            "q0",
+            "[x8",
+            "#0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802288,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802292,
+          "size": 4,
+          "mnemonic": "str",
+          "operands": [
+            "w9",
+            "[x8]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802296,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x8",
+            "[x29",
+            "#-0x20]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802300,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "w8",
+            "[x8]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802304,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x9",
+            "[x29",
+            "#-0x18]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802308,
+          "size": 4,
+          "mnemonic": "str",
+          "operands": [
+            "w10",
+            "[x9]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802312,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "x9",
+            "[x29",
+            "#-0x18]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802316,
+          "size": 4,
+          "mnemonic": "ldr",
+          "operands": [
+            "w9",
+            "[x9]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802320,
+          "size": 4,
+          "mnemonic": "and",
+          "operands": [
+            "w10",
+            "w8",
+            "w9"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802324,
+          "size": 4,
+          "mnemonic": "orn",
+          "operands": [
+            "w11",
+            "w9",
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802328,
+          "size": 4,
+          "mnemonic": "bic",
+          "operands": [
+            "w8",
+            "w8",
+            "w9"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802332,
+          "size": 4,
+          "mnemonic": "add",
+          "operands": [
+            "w11",
+            "w11",
+            "w10"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802336,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x174b"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802340,
+          "size": 4,
+          "mnemonic": "add",
+          "operands": [
+            "w8",
+            "w11",
+            "w8"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802344,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0xd18b",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802348,
+          "size": 4,
+          "mnemonic": "add",
+          "operands": [
+            "w8",
+            "w8",
+            "#1"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802352,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w9",
+            "[x29",
+            "#-0x30]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802356,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x6f9c"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802360,
+          "size": 4,
+          "mnemonic": "eor",
+          "operands": [
+            "w8",
+            "w8",
+            "w10"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802364,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w10",
+            "#0x8d65"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802368,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w9",
+            "#0x625d",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802372,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "#0"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802376,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x78d7"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802380,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w10",
+            "#0x7eae",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802384,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0xb3d6",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802388,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w9",
+            "[x29",
+            "#-0x34]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802392,
+          "size": 4,
+          "mnemonic": "csel",
+          "operands": [
+            "w8",
+            "w10",
+            "w8",
+            "ne"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802396,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w23"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802400,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "w8",
+            "[x29",
+            "#-0x2c]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802404,
+          "size": 4,
+          "mnemonic": "b.lt",
+          "operands": [
+            "#0x1b8000"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802240,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802408,
+      "instructions": [
+        {
+          "addr": 1802408,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f84"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802116,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802412,
+      "instructions": [
+        {
+          "addr": 1802412,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802416,
+          "size": 4,
+          "mnemonic": "b.ne",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802420,
+      "instructions": [
+        {
+          "addr": 1802420,
+          "size": 4,
+          "mnemonic": "ldur",
+          "operands": [
+            "w11",
+            "[x29",
+            "#-0x38]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802424,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0x9c54"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802428,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w10",
+            "#0x8b21"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802432,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x531f",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802436,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w9",
+            "#0x3f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802440,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w10",
+            "#0xdc27",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802444,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w11",
+            "#0x3f"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802448,
+          "size": 4,
+          "mnemonic": "stp",
+          "operands": [
+            "w10",
+            "w8",
+            "[x29",
+            "#-0x34]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802452,
+          "size": 4,
+          "mnemonic": "mov",
+          "operands": [
+            "w8",
+            "#0xe1fd"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802456,
+          "size": 4,
+          "mnemonic": "csel",
+          "operands": [
+            "w9",
+            "w11",
+            "w9",
+            "lo"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802460,
+          "size": 4,
+          "mnemonic": "movk",
+          "operands": [
+            "w8",
+            "#0x43cb",
+            "lsl #16"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802464,
+          "size": 4,
+          "mnemonic": "stur",
+          "operands": [
+            "x9",
+            "[x29",
+            "#-0x10]"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802468,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f78"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802104,
+            "conditional": false
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802472,
+      "instructions": [
+        {
+          "addr": 1802472,
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": [
+            "w8",
+            "w24"
+          ],
+          "branch_info": {}
+        },
+        {
+          "addr": 1802476,
+          "size": 4,
+          "mnemonic": "b.eq",
+          "operands": [
+            "#0x1b7e20"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1801760,
+            "conditional": true
+          }
+        }
+      ]
+    },
+    {
+      "start": 1802480,
+      "instructions": [
+        {
+          "addr": 1802480,
+          "size": 4,
+          "mnemonic": "b",
+          "operands": [
+            "#0x1b7f64"
+          ],
+          "branch_info": {
+            "kind": "jump",
+            "target": 1802084,
+            "conditional": false
+          }
+        }
+      ]
+    }
+  ],
+  "pseudoc_context": {
+    "kind": "elf"
+  }
+}

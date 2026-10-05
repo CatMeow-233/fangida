@@ -1,0 +1,8 @@
+{
+  "save_to_new_database_seconds": 2.422080542000913,
+  "gui_prepare_seconds": 0.0010396670004411135,
+  "benchmark_execution": "sequential, after completed native analysis",
+  "unannotated_first_save_readback_avoided": true,
+  "instructions": 255974,
+  "database_bytes": 6905856
+}

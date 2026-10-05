@@ -1,0 +1,22 @@
+{
+  "source_database": "/Users/meow233/Desktop/ai/fangida-0.4.0/analysis-databases/challenge-verified.fdb",
+  "database_restore_seconds": 1.4553285830006644,
+  "owned_snapshot_to_view_seconds": 2.445900099701248e-05,
+  "gui_prepare_seconds": 0.001380375000735512,
+  "total_before_render_seconds": 0.0014048340017325245,
+  "database_to_gui_prepared_seconds": 1.456733417002397,
+  "table_counts": {
+    "Sections": 30,
+    "Functions": 690,
+    "Disassembly": 255974,
+    "Strings": 1000,
+    "Imports": 16,
+    "Exports": 0,
+    "Xrefs": 28913
+  },
+  "instructions": 255974,
+  "evidence_sha256": "a82740b52402fa48375cf8f878023074c86929da7fae1652c6b88f99637fb6fd",
+  "evidence_equal": true,
+  "share_completed_opt_in": true,
+  "timing_scope": "GUI read-only opt-in path; excludes visible Tk rendering"
+}

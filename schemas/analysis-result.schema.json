@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fangida.local/schemas/analysis-result/1.0",
+  "title": "Fangida AnalysisResult v1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "path", "kind", "analyzer", "status", "metadata", "functions", "strings", "imports", "exports", "xrefs", "stats", "warnings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "path": {"type": "string"},
+    "kind": {"type": "string", "minLength": 1},
+    "analyzer": {"type": "string", "minLength": 1},
+    "status": {"enum": ["partial", "complete", "error"]},
+    "metadata": {"type": "object"},
+    "functions": {"type": "array", "items": {"type": "object"}},
+    "strings": {"type": "array", "items": {"type": "object"}},
+    "imports": {"type": "array", "items": {"type": "object"}},
+    "exports": {"type": "array", "items": {"type": "object"}},
+    "xrefs": {"type": "array", "items": {"$ref": "#/$defs/xref"}},
+    "stats": {"type": "object"},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "xref": {
+      "type": "object", "required": ["src", "dst", "kind"],
+      "properties": {"src": {"type": "integer", "minimum": 0}, "dst": {"type": "integer", "minimum": 0},
+        "kind": {"enum": ["call", "jmp", "data"]}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
+      "additionalProperties": true
+    },
+    "instruction": {
+      "type": "object", "required": ["addr", "size", "mnemonic", "operands", "reads", "writes", "branch_info", "arch_meta"],
+      "properties": {"addr": {"type": "integer", "minimum": 0}, "size": {"type": "integer", "minimum": 1},
+        "mnemonic": {"type": "string"}, "operands": {"type": "array", "items": {"type": "string"}},
+        "reads": {"type": "array", "items": {"type": "string"}}, "writes": {"type": "array", "items": {"type": "string"}},
+        "branch_info": {"type": "object"}, "arch_meta": {"type": "object"}},
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,355 @@
+{
+  "created_at_utc": "2026-10-01T02:41:39.733760+00:00",
+  "repository": "/Users/meow233/Desktop/ai/fangida-0.4.0",
+  "source": "/Users/meow233/Downloads/project/dist/challenge",
+  "source_sha256": "223358017040ab6ed519b4ad8f5ff4f30a00a167f6e1a54238b2f266b7a85d55",
+  "source_size_bytes": 1239360,
+  "database": "/Users/meow233/Desktop/ai/fangida-0.4.0/analysis-databases/challenge-verified.fdb",
+  "database_open_mode": "read_only=True",
+  "runs": 3,
+  "environment": {
+    "python": "3.13.2",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "cpu_count": 15
+  },
+  "measurement_scope": {
+    "includes": "数据库/已完成快照/导航索引/保存标注/JSON导出",
+    "excludes": [
+      "源文件分析",
+      "Tk窗口创建与可见绘制",
+      "GUI事件队列等待",
+      "解释器启动和模块导入",
+      "临时目录清理",
+      "报告序列化写入",
+      "cProfile归因"
+    ],
+    "gc": "每次计时前显式 gc.collect；计时期间保留 Python 默认自动GC，不插桩",
+    "cache": "顺序重复；第一轮和后续轮均保留，OS缓存未强制清空",
+    "writes": "数据库、标注与API导出仅写 TemporaryDirectory；报告写入 --output 指定位置",
+    "sum_warning": "standalone 索引是独立重复诊断，与 GUI prepare 重叠，禁止重复相加",
+    "cpu_seconds": "当前进程所有线程CPU，不含子进程"
+  },
+  "stage_scopes": {
+    "database_open_read_only": "原库 read_only=True 打开及格式/表结构校验，不含快照恢复",
+    "database_restore": "原库最新快照恢复：读取、解压、JSON、共享指令引用展开及已有标注覆盖",
+    "owned_snapshot_to_view": "GUI 私有快照接管与兼容字段校验，不做公共 API 深复制",
+    "gui_prepare_including_navigation": "实际 _prepare(share_completed=True)，含源指纹验证、表投影、CFG列表与导航索引",
+    "navigation_index_standalone": "对已准备的 rows/CFG 独立重建 AddressIndex；与上项重叠，不得相加",
+    "new_database_create": "临时新库创建、迁移及校验，不含保存",
+    "new_database_save_analysis": "已有结果首次保存，含源验证、收集去重、JSON、zlib(level=1)及事务提交，不重新分析",
+    "annotation_database_open": "重新打开临时库，模拟标注工作线程的数据库校验，不含写入",
+    "annotation_write_transaction": "set_comment 验证、连接、单条 SQL 写入及事务提交，不含快照恢复",
+    "annotation_full_restore": "标注后调用 get_snapshot，全量恢复并覆盖标注",
+    "annotation_owned_snapshot_to_view": "标注后 GUI 私有快照接管",
+    "annotation_gui_prepare_including_navigation": "标注后实际 GUI _prepare，含源验证、表投影与导航重建",
+    "annotation_navigation_index_standalone": "标注后独立导航重建诊断，与上一项重叠，不得相加",
+    "api_export_json": "公开 AnalysisView.export_json：整份快照 JSON(indent=2)序列化及临时文件写入"
+  },
+  "samples": [
+    {
+      "run": 1,
+      "stages": {
+        "database_open_read_only": {
+          "wall_seconds": 0.0022955419990466908,
+          "cpu_seconds": 0.001904000000000003
+        },
+        "database_restore": {
+          "wall_seconds": 1.3958621670026332,
+          "cpu_seconds": 1.39361
+        },
+        "owned_snapshot_to_view": {
+          "wall_seconds": 3.162500070175156e-05,
+          "cpu_seconds": 3.599999999992498e-05
+        },
+        "gui_prepare_including_navigation": {
+          "wall_seconds": 0.4039035829991917,
+          "cpu_seconds": 0.403524
+        },
+        "navigation_index_standalone": {
+          "wall_seconds": 0.40096387499943376,
+          "cpu_seconds": 0.40064100000000025
+        },
+        "new_database_create": {
+          "wall_seconds": 0.0024557079959777184,
+          "cpu_seconds": 0.0020050000000000345
+        },
+        "new_database_save_analysis": {
+          "wall_seconds": 2.166799958999036,
+          "cpu_seconds": 2.162716
+        },
+        "annotation_database_open": {
+          "wall_seconds": 0.0006932080068509094,
+          "cpu_seconds": 0.000696000000000474
+        },
+        "annotation_write_transaction": {
+          "wall_seconds": 0.0009626669998397119,
+          "cpu_seconds": 0.0007970000000003807
+        },
+        "annotation_full_restore": {
+          "wall_seconds": 3.0641469590045745,
+          "cpu_seconds": 3.0606210000000003
+        },
+        "annotation_owned_snapshot_to_view": {
+          "wall_seconds": 1.7958998796530068e-05,
+          "cpu_seconds": 2.200000000129876e-05
+        },
+        "annotation_gui_prepare_including_navigation": {
+          "wall_seconds": 0.40699112500442425,
+          "cpu_seconds": 0.40642200000000095
+        },
+        "annotation_navigation_index_standalone": {
+          "wall_seconds": 0.40510858299967367,
+          "cpu_seconds": 0.4047520000000002
+        },
+        "api_export_json": {
+          "wall_seconds": 0.5605010829967796,
+          "cpu_seconds": 0.5579399999999985
+        }
+      },
+      "table_counts": {
+        "Sections": 30,
+        "Functions": 690,
+        "Disassembly": 255974,
+        "Strings": 1000,
+        "Imports": 16,
+        "Exports": 0,
+        "Xrefs": 28913,
+        "Pseudocode": 0,
+        "API Calls": 0
+      },
+      "cfg_count": 690,
+      "snapshot_kind": "elf",
+      "full_analysis": true,
+      "original_database_source": "/Users/meow233/Downloads/project/dist/challenge",
+      "source_path_relocated_in_memory": false,
+      "saved_database_bytes": 6905856,
+      "export_json_bytes": 247166931,
+      "annotation_address": 8192,
+      "annotation_restored_correctly": true
+    },
+    {
+      "run": 2,
+      "stages": {
+        "database_open_read_only": {
+          "wall_seconds": 0.001941582995641511,
+          "cpu_seconds": 0.00066500000000147
+        },
+        "database_restore": {
+          "wall_seconds": 1.4211511250032345,
+          "cpu_seconds": 1.414161
+        },
+        "owned_snapshot_to_view": {
+          "wall_seconds": 1.7082995327655226e-05,
+          "cpu_seconds": 1.9999999999242846e-05
+        },
+        "gui_prepare_including_navigation": {
+          "wall_seconds": 0.40963387500232784,
+          "cpu_seconds": 0.4091950000000004
+        },
+        "navigation_index_standalone": {
+          "wall_seconds": 0.40726645800168626,
+          "cpu_seconds": 0.40690700000000035
+        },
+        "new_database_create": {
+          "wall_seconds": 0.00210499999957392,
+          "cpu_seconds": 0.0017190000000013583
+        },
+        "new_database_save_analysis": {
+          "wall_seconds": 2.17613550000533,
+          "cpu_seconds": 2.17235
+        },
+        "annotation_database_open": {
+          "wall_seconds": 0.0006359999970300123,
+          "cpu_seconds": 0.0006400000000006401
+        },
+        "annotation_write_transaction": {
+          "wall_seconds": 0.0012169159963377751,
+          "cpu_seconds": 0.0008400000000001739
+        },
+        "annotation_full_restore": {
+          "wall_seconds": 3.198846457999025,
+          "cpu_seconds": 3.1931829999999977
+        },
+        "annotation_owned_snapshot_to_view": {
+          "wall_seconds": 1.629199687158689e-05,
+          "cpu_seconds": 1.899999999821489e-05
+        },
+        "annotation_gui_prepare_including_navigation": {
+          "wall_seconds": 0.4122720829982427,
+          "cpu_seconds": 0.41179699999999997
+        },
+        "annotation_navigation_index_standalone": {
+          "wall_seconds": 0.41075241599901346,
+          "cpu_seconds": 0.4103490000000001
+        },
+        "api_export_json": {
+          "wall_seconds": 0.5430786249999073,
+          "cpu_seconds": 0.5404489999999988
+        }
+      },
+      "table_counts": {
+        "Sections": 30,
+        "Functions": 690,
+        "Disassembly": 255974,
+        "Strings": 1000,
+        "Imports": 16,
+        "Exports": 0,
+        "Xrefs": 28913,
+        "Pseudocode": 0,
+        "API Calls": 0
+      },
+      "cfg_count": 690,
+      "snapshot_kind": "elf",
+      "full_analysis": true,
+      "original_database_source": "/Users/meow233/Downloads/project/dist/challenge",
+      "source_path_relocated_in_memory": false,
+      "saved_database_bytes": 6905856,
+      "export_json_bytes": 247166931,
+      "annotation_address": 8192,
+      "annotation_restored_correctly": true
+    },
+    {
+      "run": 3,
+      "stages": {
+        "database_open_read_only": {
+          "wall_seconds": 0.0030423339994740672,
+          "cpu_seconds": 0.0006829999999986569
+        },
+        "database_restore": {
+          "wall_seconds": 1.4260079159939778,
+          "cpu_seconds": 1.4240580000000023
+        },
+        "owned_snapshot_to_view": {
+          "wall_seconds": 1.6250000044237822e-05,
+          "cpu_seconds": 1.9000000001767603e-05
+        },
+        "gui_prepare_including_navigation": {
+          "wall_seconds": 0.41140654100308893,
+          "cpu_seconds": 0.4110580000000006
+        },
+        "navigation_index_standalone": {
+          "wall_seconds": 0.41044687499379506,
+          "cpu_seconds": 0.4100839999999977
+        },
+        "new_database_create": {
+          "wall_seconds": 0.0020146659953752533,
+          "cpu_seconds": 0.0016709999999982017
+        },
+        "new_database_save_analysis": {
+          "wall_seconds": 2.1972713750001276,
+          "cpu_seconds": 2.192615
+        },
+        "annotation_database_open": {
+          "wall_seconds": 0.0006880420041852631,
+          "cpu_seconds": 0.0006829999999986569
+        },
+        "annotation_write_transaction": {
+          "wall_seconds": 0.0011312920032651164,
+          "cpu_seconds": 0.0007839999999994518
+        },
+        "annotation_full_restore": {
+          "wall_seconds": 3.151559249999991,
+          "cpu_seconds": 3.1484389999999998
+        },
+        "annotation_owned_snapshot_to_view": {
+          "wall_seconds": 1.7083999409805983e-05,
+          "cpu_seconds": 2.099999999671809e-05
+        },
+        "annotation_gui_prepare_including_navigation": {
+          "wall_seconds": 0.4096181249988149,
+          "cpu_seconds": 0.40931000000000495
+        },
+        "annotation_navigation_index_standalone": {
+          "wall_seconds": 0.4081064999991213,
+          "cpu_seconds": 0.407701000000003
+        },
+        "api_export_json": {
+          "wall_seconds": 0.5488839999961783,
+          "cpu_seconds": 0.5445720000000023
+        }
+      },
+      "table_counts": {
+        "Sections": 30,
+        "Functions": 690,
+        "Disassembly": 255974,
+        "Strings": 1000,
+        "Imports": 16,
+        "Exports": 0,
+        "Xrefs": 28913,
+        "Pseudocode": 0,
+        "API Calls": 0
+      },
+      "cfg_count": 690,
+      "snapshot_kind": "elf",
+      "full_analysis": true,
+      "original_database_source": "/Users/meow233/Downloads/project/dist/challenge",
+      "source_path_relocated_in_memory": false,
+      "saved_database_bytes": 6905856,
+      "export_json_bytes": 247166931,
+      "annotation_address": 8192,
+      "annotation_restored_correctly": true
+    }
+  ],
+  "median": {
+    "database_open_read_only": {
+      "wall_seconds": 0.0022955419990466908,
+      "cpu_seconds": 0.0006829999999986569
+    },
+    "database_restore": {
+      "wall_seconds": 1.4211511250032345,
+      "cpu_seconds": 1.414161
+    },
+    "owned_snapshot_to_view": {
+      "wall_seconds": 1.7082995327655226e-05,
+      "cpu_seconds": 1.9999999999242846e-05
+    },
+    "gui_prepare_including_navigation": {
+      "wall_seconds": 0.40963387500232784,
+      "cpu_seconds": 0.4091950000000004
+    },
+    "navigation_index_standalone": {
+      "wall_seconds": 0.40726645800168626,
+      "cpu_seconds": 0.40690700000000035
+    },
+    "new_database_create": {
+      "wall_seconds": 0.00210499999957392,
+      "cpu_seconds": 0.0017190000000013583
+    },
+    "new_database_save_analysis": {
+      "wall_seconds": 2.17613550000533,
+      "cpu_seconds": 2.17235
+    },
+    "annotation_database_open": {
+      "wall_seconds": 0.0006880420041852631,
+      "cpu_seconds": 0.0006829999999986569
+    },
+    "annotation_write_transaction": {
+      "wall_seconds": 0.0011312920032651164,
+      "cpu_seconds": 0.0007970000000003807
+    },
+    "annotation_full_restore": {
+      "wall_seconds": 3.151559249999991,
+      "cpu_seconds": 3.1484389999999998
+    },
+    "annotation_owned_snapshot_to_view": {
+      "wall_seconds": 1.7083999409805983e-05,
+      "cpu_seconds": 2.099999999671809e-05
+    },
+    "annotation_gui_prepare_including_navigation": {
+      "wall_seconds": 0.4096181249988149,
+      "cpu_seconds": 0.40931000000000495
+    },
+    "annotation_navigation_index_standalone": {
+      "wall_seconds": 0.4081064999991213,
+      "cpu_seconds": 0.407701000000003
+    },
+    "api_export_json": {
+      "wall_seconds": 0.5488839999961783,
+      "cpu_seconds": 0.5445720000000023
+    }
+  },
+  "profile_attribution": {
+    "database_restore": "/Users/meow233/Desktop/ai/fangida-0.4.0/benchmark-results/gui-storage-bottleneck-current-2026-09-30-database-restore-profile.txt",
+    "navigation_index": "/Users/meow233/Desktop/ai/fangida-0.4.0/benchmark-results/gui-storage-bottleneck-current-2026-09-30-navigation-index-profile.txt"
+  }
+}

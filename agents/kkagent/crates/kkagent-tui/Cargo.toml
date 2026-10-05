@@ -1,0 +1,36 @@
+[package]
+name = "kkagent-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kkagent-protocol = { workspace = true }
+kkagent-core = { workspace = true }
+kkagent-client = { workspace = true }
+kkagent-config = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+# Match ratatui 0.29's main width table (it pins =0.2.0 for Line::width/cell
+# layout). Its truncation path (unicode-truncate ^1) still pulls 0.1 — a
+# ratatui-internal split we cannot unify until ratatui moves to
+# unicode-truncate 2+. Do not downgrade this to 0.1.
+unicode-width = "0.2"
+unicode-segmentation = "1.12"
+base64 = { workspace = true }
+ignore = { workspace = true }
+uuid = { workspace = true }
+image = { workspace = true }
+pulldown-cmark = { version = "0.13", default-features = false }
+semver = { workspace = true }
+
+[dev-dependencies]
+kkagent-rpc = { workspace = true }

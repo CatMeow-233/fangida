@@ -1,0 +1,12974 @@
+// Keep this binary's tests (Session::new et al.) out of the real
+// ~/.kkagent home.
+kkagent_core::install_test_home!();
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use std::collections::HashMap;
+use std::io::{self, IsTerminal};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio::task::AbortHandle;
+
+use kkagent_client::KkagentClient;
+use kkagent_config::{load_config, AppConfig, DisabledState};
+use kkagent_core::plan_review::{resolve_exit_plan_approval, PlanReviewDisplay};
+use kkagent_core::SubagentMirrorContext;
+use kkagent_core::{
+    is_safe_session_id, AgentLifecycleService, AgentLoop, BtwTurn, PermissionChain, Session,
+    SessionBtwService, SessionCloseReason, SessionCreateSource, SessionFallbackModel,
+    SessionSteerMailbox, SessionStore, SteerInput, TranscriptDb,
+};
+use kkagent_di::ServiceContainer;
+use kkagent_llm::{ChatContent, ChatMessage};
+use kkagent_mcp::{register_mcp_tools, McpManager};
+use kkagent_protocol::subagent::{stamp_child_depth, SubagentManager};
+use kkagent_protocol::{AgentEvent, Frame, PermissionMode, SessionStatus};
+use kkagent_rpc::{transport::memory::create_memory_pair, RpcClient, RpcServer};
+use kkagent_telemetry::{
+    CloudAppender, CloudAppenderOptions, ConsoleAppender, FileAppender, TelemetryService,
+};
+use kkagent_tools::ToolRegistry;
+use kkagent_tui::TuiApp;
+
+mod diagnostics;
+mod headless;
+mod onboarding;
+use diagnostics::RunDiagnostics;
+use onboarding::{run_config, run_doctor, run_init};
+
+struct LocalEndpointGuard(PathBuf);
+
+impl Drop for LocalEndpointGuard {
+    fn drop(&mut self) {
+        if let Err(error) = kkagent_rpc::transport::uds::remove_endpoint(&self.0) {
+            tracing::warn!(path = %self.0.display(), %error, "failed to remove local endpoint");
+        }
+    }
+}
+
+#[derive(Parser)]
+#[command(name = "ctfer", version, about = "CTF solving agent for your terminal")]
+struct Cli {
+    /// Path to config file
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Auto-approve regular tool calls (YOLO mode)
+    #[arg(long, short = 'y', conflicts_with = "auto")]
+    yolo: bool,
+
+    /// Fully autonomous mode
+    #[arg(long, conflicts_with = "yolo")]
+    auto: bool,
+
+    /// Start in Plan mode
+    #[arg(long)]
+    plan: bool,
+
+    /// Non-interactive prompt mode
+    #[arg(short = 'p', long)]
+    prompt: Option<String>,
+
+    /// Output format for -p mode (text | json | stream-json)
+    #[arg(long, requires = "prompt")]
+    output_format: Option<headless::OutputFormat>,
+
+    /// Input format for -p mode (text | stream-json); stream-json reads NDJSON from stdin
+    #[arg(long, requires = "prompt")]
+    input_format: Option<headless::InputFormat>,
+
+    /// Max agent rounds (LLM steps) per headless turn; exceeding exits with code 3
+    #[arg(long, requires = "prompt")]
+    max_turns: Option<u32>,
+
+    /// Continue the most recent session (headless: with -p)
+    #[arg(long = "continue", requires = "prompt")]
+    continue_: bool,
+
+    /// Resume an existing session by id (or prefix); with no id, show the session picker
+    #[arg(long, short = 'r')]
+    resume: Option<Option<String>>,
+
+    /// Connect to an existing server
+    #[arg(long)]
+    connect: Option<String>,
+
+    /// Keep the terminal's primary screen (native scrollback); skip alternate screen
+    #[arg(long)]
+    no_alt_screen: bool,
+
+    /// Print the fully composed system prompt plus the registered tool
+    /// inventory for the current workspace and exit (no model call, no
+    /// session side effects)
+    #[arg(long)]
+    dump_system_prompt: bool,
+
+    /// Disable Bash OS sandboxing and resource limits for this process (unsafe)
+    #[arg(long)]
+    disable_sandbox: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run or manage the standalone RPC server
+    Server {
+        #[command(subcommand)]
+        command: Option<ServerCommand>,
+        /// Socket path to listen on / connect to for stop|status
+        #[arg(long, global = true)]
+        listen: Option<String>,
+        /// Also serve REST+WS on this address (e.g. 127.0.0.1:8787)
+        #[arg(long)]
+        http: Option<String>,
+        /// Bearer/query token for HTTP API
+        #[arg(long)]
+        http_token: Option<String>,
+        /// Enable the authenticated arbitrary-command terminal API
+        #[arg(long)]
+        allow_terminal_api: bool,
+        /// Enable direct authenticated writes through POST /api/v1/fs
+        #[arg(long)]
+        allow_fs_write_api: bool,
+        /// Per-token HTTP request limit per minute (0 disables limiting)
+        #[arg(long, default_value_t = 600)]
+        http_rate_limit: u32,
+        /// Append structured HTTP audit records to this file
+        #[arg(long)]
+        http_audit_log: Option<PathBuf>,
+    },
+    /// Serve Agent Client Protocol over stdio (IDE bridge)
+    Acp,
+    /// Manage Kimi Code managed-account authentication
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
+    /// Create a minimal working configuration (interactive by default)
+    Init {
+        /// safe | default | full-auto
+        #[arg(long, default_value = "default")]
+        preset: String,
+        /// openai | anthropic | kimi | google | custom
+        #[arg(long)]
+        provider: Option<String>,
+        /// Provider model id
+        #[arg(long)]
+        model: Option<String>,
+        /// Override provider base URL
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Replace an existing config file
+        #[arg(long)]
+        force: bool,
+        /// Never prompt; missing required values are errors
+        #[arg(long)]
+        non_interactive: bool,
+    },
+    /// Inspect and edit configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+    /// Check configuration, provider, sandbox, storage, and common tools
+    Doctor {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Also probe the configured provider endpoint
+        #[arg(long)]
+        live: bool,
+        /// Print a support-bundle inventory (no secrets / transcripts) and exit
+        #[arg(long)]
+        bundle: bool,
+    },
+    /// Import legacy kimi-code / `.kimi` sessions into kkagent
+    Migrate {
+        /// Legacy data root (e.g. ~/.kimi)
+        #[arg(long)]
+        from: PathBuf,
+        /// Preview without writing to the transcript DB
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dry_run: bool,
+        /// Actually write imported sessions (disables dry-run)
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate shell completion scripts
+    Completions {
+        /// bash | zsh | fish | powershell
+        shell: String,
+    },
+    /// Export one session as a self-contained debug bundle for analysis
+    ///
+    /// Writes transcript.json, filtered audit.jsonl, filtered kkagent.log,
+    /// tool-results, and the on-disk session directory into a single folder
+    /// (default under ~/.kkagent/exports/). Never includes other sessions.
+    ExportSession {
+        /// Session id (see `kk config show` / session index)
+        session_id: String,
+        /// Output directory (created; must not already exist)
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Also print the manifest JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    /// Stop the running standalone server (refuses when a turn is active)
+    Stop,
+    /// Show standalone server status
+    Status {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ConfigCommands {
+    /// Print the effective config with secrets redacted
+    Show,
+    /// Read a dotted config key
+    Get { key: String },
+    /// Set a dotted config key to a TOML value
+    Set { key: String, value: String },
+    /// Apply safe, default, or full-auto runtime defaults
+    Preset { name: String },
+    /// Preview schema migrations without writing (dry-run)
+    Migrate {
+        /// Actually write after backup (default is dry-run)
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Check / repair transcript DB integrity
+    Repair {
+        /// Quarantine corrupt rows after backup (default: check only)
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Sign in and provision managed models (Kimi device-code or Anthropic OAuth)
+    Login {
+        /// OAuth provider to sign in with: `kimi` (default) or `anthropic`
+        #[arg(long, default_value = "kimi")]
+        provider: String,
+        /// For Anthropic: use the Claude Console login instead of the Claude.ai subscription
+        #[arg(long)]
+        console: bool,
+        /// Do not try to open the authorization URL in a browser automatically
+        #[arg(long)]
+        no_browser: bool,
+        #[arg(long)]
+        oauth_host: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+    /// Remove the locally stored credential (Kimi and/or Anthropic)
+    Logout {
+        #[arg(long, default_value = "kimi")]
+        provider: String,
+    },
+    /// Show whether a credential is available
+    Status {
+        #[arg(long, default_value = "kimi")]
+        provider: String,
+    },
+}
+
+fn validate_runtime_cli(cli: &Cli) -> Result<()> {
+    if cli.connect.is_some() && cli.command.is_some() {
+        anyhow::bail!("--connect is only valid for TUI or --prompt mode");
+    }
+    if cli.disable_sandbox && cli.connect.is_some() {
+        anyhow::bail!(
+            "--disable-sandbox cannot be used with --connect; configure the remote server instead"
+        );
+    }
+    Ok(())
+}
+
+fn apply_runtime_overrides(cli: &Cli, config: &mut AppConfig) {
+    if cli.disable_sandbox {
+        config.sandbox.mode = "disabled".into();
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // --dump-system-prompt prints to stdout and must not disturb the TUI.
+    if cli.dump_system_prompt {
+        if cli.command.is_some() || cli.prompt.is_some() {
+            anyhow::bail!("--dump-system-prompt cannot be combined with a subcommand or --prompt");
+        }
+        return run_dump_system_prompt(cli.config.as_deref()).await;
+    }
+
+    let is_tui = cli.command.is_none() && cli.prompt.is_none();
+
+    // Detect an unusable kkagent home (e.g. `~/.kkagent` being a regular file)
+    // before logging/diagnostics try to write into it, so the user gets one
+    // clear, actionable error instead of cryptic OS errors like `File exists`.
+    kkagent_config::validate_config_dir()?;
+
+    init_logging(is_tui)?;
+
+    let mut diagnostics = RunDiagnostics::start(runtime_mode(&cli))?;
+    diagnostics.install_panic_hook();
+    diagnostics.start_signal_watchers();
+
+    let result = run(cli).await;
+    diagnostics.finish(result.as_ref().err());
+    result
+}
+
+fn runtime_mode(cli: &Cli) -> &'static str {
+    if cli.dump_system_prompt {
+        return "dump_system_prompt";
+    }
+    match (&cli.command, &cli.prompt) {
+        (Some(Commands::Server { .. }), _) => "server",
+        (Some(Commands::Acp), _) => "acp",
+        (Some(Commands::Auth { .. }), _) => "auth",
+        (Some(Commands::Init { .. }), _) => "init",
+        (Some(Commands::Config { .. }), _) => "config",
+        (Some(Commands::Doctor { .. }), _) => "doctor",
+        (Some(Commands::Migrate { .. }), _) => "migrate",
+        (Some(Commands::Completions { .. }), _) => "completions",
+        (Some(Commands::ExportSession { .. }), _) => "export_session",
+        (None, Some(_)) => "print",
+        (None, None) => "tui",
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    if let Some(Commands::Auth { command }) = &cli.command {
+        return run_auth(command, cli.config.as_deref()).await;
+    }
+    match &cli.command {
+        Some(Commands::Init {
+            preset,
+            provider,
+            model,
+            base_url,
+            force,
+            non_interactive,
+        }) => {
+            return run_init(
+                cli.config.as_deref(),
+                preset,
+                provider.as_deref(),
+                model.as_deref(),
+                base_url.as_deref(),
+                *force,
+                *non_interactive,
+            )
+        }
+        Some(Commands::Config { command }) => {
+            return run_config(command, cli.config.as_deref());
+        }
+        Some(Commands::Doctor { json, live, bundle }) => {
+            if *bundle {
+                return print_doctor_bundle(cli.config.as_deref());
+            }
+            return run_doctor(cli.config.as_deref(), *json, *live).await;
+        }
+        Some(Commands::Migrate {
+            from,
+            dry_run,
+            apply,
+            json,
+        }) => {
+            let effective_dry_run = if *apply { false } else { *dry_run };
+            let report = kkagent_core::migrate_legacy_home(from, effective_dry_run)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("migrate from {} (dry_run={})", report.from, report.dry_run);
+                println!(
+                    "scanned={} imported_sessions={} imported_messages={}",
+                    report.scanned_sessions, report.imported_sessions, report.imported_messages
+                );
+                for skip in &report.skipped {
+                    println!("skip: {skip}");
+                }
+                for err in &report.errors {
+                    eprintln!("error: {err}");
+                }
+            }
+            if !report.errors.is_empty() {
+                anyhow::bail!("migration finished with {} error(s)", report.errors.len());
+            }
+            return Ok(());
+        }
+        Some(Commands::Completions { shell }) => {
+            return print_completions(shell);
+        }
+        Some(Commands::ExportSession {
+            session_id,
+            output,
+            json,
+        }) => {
+            return run_export_session(session_id, output.as_deref(), *json);
+        }
+        _ => {}
+    }
+
+    validate_runtime_cli(&cli)?;
+
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(kkagent_config::default_config_path);
+    if !config_path.exists() {
+        if cli.config.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
+            println!("No ctfer config found. Starting first-run setup.\n");
+            run_init(None, "default", None, None, None, false, false)?;
+        } else {
+            anyhow::bail!(
+                "configuration not found at {}; run `ctfer init` first",
+                config_path.display()
+            );
+        }
+    }
+    let mut config = load_config(Some(&config_path))?;
+    apply_runtime_overrides(&cli, &mut config);
+    apply_privacy(&config);
+    if cli.connect.is_none() {
+        hydrate_provider_oauth(&mut config).await?;
+    }
+
+    let permission_mode = if cli.auto {
+        PermissionMode::Auto
+    } else if cli.yolo {
+        PermissionMode::Yolo
+    } else {
+        config
+            .effective_permission_mode()
+            .parse()
+            .unwrap_or(PermissionMode::Manual)
+    };
+
+    match cli.command {
+        Some(Commands::Server {
+            command: Some(ServerCommand::Stop),
+            listen,
+            ..
+        }) => run_server_stop(listen).await,
+        Some(Commands::Server {
+            command: Some(ServerCommand::Status { json }),
+            listen,
+            ..
+        }) => run_server_status(listen, json).await,
+        Some(Commands::Server {
+            command: None,
+            listen,
+            http,
+            http_token,
+            allow_terminal_api,
+            allow_fs_write_api,
+            http_rate_limit,
+            http_audit_log,
+        }) => {
+            let mut token = http_token.or_else(|| std::env::var("KKAGENT_HTTP_TOKEN").ok());
+            if http.is_some() && token.as_deref().is_none_or(str::is_empty) {
+                let generated = load_or_generate_http_token();
+                tracing::warn!("No HTTP token was supplied. Using persisted token: {generated}");
+                token = Some(generated);
+            }
+            let mut scoped_tokens = HashMap::new();
+            if let Ok(token) = std::env::var("KKAGENT_HTTP_READ_TOKEN") {
+                if !token.trim().is_empty() {
+                    scoped_tokens.insert(token, vec!["read".into()]);
+                }
+            }
+            if let Ok(token) = std::env::var("KKAGENT_HTTP_WRITE_TOKEN") {
+                if !token.trim().is_empty() {
+                    scoped_tokens.insert(token, vec!["read".into(), "write".into()]);
+                }
+            }
+            if let Ok(token) = std::env::var("KKAGENT_HTTP_TERMINAL_TOKEN") {
+                if !token.trim().is_empty() {
+                    scoped_tokens.insert(token, vec!["read".into(), "terminal".into()]);
+                }
+            }
+            let security = kkagent_rpc::HttpSecurityOptions {
+                scoped_tokens,
+                allow_terminal_api,
+                allow_fs_write_api,
+                requests_per_minute: http_rate_limit,
+                audit_log: Some(http_audit_log.unwrap_or_else(|| {
+                    kkagent_config::default_config_dir().join("http-audit.jsonl")
+                })),
+            };
+            run_server(config, config_path, listen, http, token, security).await
+        }
+        Some(Commands::Acp) => {
+            let state = build_server_state(Arc::new(config), config_path).await?;
+            let server = kkagent_acp::AcpServer::with_host(Arc::new(AgentAcpHost { state }));
+            server.serve_stdio().await
+        }
+        Some(Commands::Auth { .. }) => unreachable!("auth handled before config startup"),
+        Some(
+            Commands::Init { .. }
+            | Commands::Config { .. }
+            | Commands::Doctor { .. }
+            | Commands::Migrate { .. }
+            | Commands::Completions { .. }
+            | Commands::ExportSession { .. },
+        ) => {
+            unreachable!("setup commands handled before runtime startup")
+        }
+        None => {
+            if let Some(prompt) = cli.prompt.clone() {
+                let resume = match (cli.resume, cli.continue_) {
+                    (Some(Some(id)), _) => headless::Resume::Id(id),
+                    (Some(None), _) => headless::Resume::Latest,
+                    (None, true) => headless::Resume::Latest,
+                    (None, false) => headless::Resume::New,
+                };
+                let print_opts = headless::PrintModeOptions {
+                    prompt,
+                    permission_mode: Some(permission_mode),
+                    output_format: cli.output_format,
+                    input_format: cli.input_format,
+                    max_turns: cli.max_turns,
+                    resume: Some(resume),
+                };
+                run_print_mode(config, config_path, cli.connect, print_opts).await
+            } else {
+                run_tui(
+                    config,
+                    config_path,
+                    permission_mode,
+                    cli.plan,
+                    cli.resume,
+                    cli.connect,
+                    cli.no_alt_screen,
+                )
+                .await
+            }
+        }
+    }
+}
+
+fn print_completions(shell: &str) -> Result<()> {
+    let name = "ctfer";
+    match shell.to_ascii_lowercase().as_str() {
+        "bash" => {
+            println!(
+                r#"# ctfer bash completion — add to ~/.bashrc:
+#   eval "$(ctfer completions bash)"
+_ctfer() {{
+  local cur="${{COMP_WORDS[COMP_CWORD]}}"
+  local cmds="server acp auth init config doctor completions"
+  if [[ ${{COMP_CWORD}} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$cmds --help --version --config --yolo --auto --plan --prompt --resume --connect --no-alt-screen --dump-system-prompt" -- "$cur") )
+  elif [[ ${{COMP_WORDS[1]}} == server ]]; then
+    COMPREPLY=( $(compgen -W "stop status --listen --http --help" -- "$cur") )
+  fi
+}}
+complete -F _ctfer {name}
+"#
+            );
+        }
+        "zsh" => {
+            println!(
+                r#"# ctfer zsh completion — add to ~/.zshrc:
+#   eval "$(ctfer completions zsh)"
+#compdef ctfer
+_arguments \
+  '--config[Path to config]:file:_files' \
+  '--yolo[Auto-approve tools]' \
+  '--auto[Fully autonomous]' \
+  '--plan[Start in plan mode]' \
+  '--prompt[Non-interactive prompt]:text:' \
+  '--resume[Resume session]:id:' \
+  '-r[Resume session]:id:' \
+  '--connect[Connect to server]:endpoint:' \
+  '--no-alt-screen[Keep primary screen]' \
+  '--dump-system-prompt[Print the composed system prompt and exit]' \
+  '1:command:(server acp auth init config doctor completions export-session)'
+"#
+            );
+        }
+        "fish" => {
+            println!(
+                r#"# ctfer fish completion — save to ~/.config/fish/completions/ctfer.fish
+complete -c ctfer -n '__fish_use_subcommand' -a 'server acp auth init config doctor completions'
+complete -c ctfer -l config -r
+complete -c ctfer -l yolo
+complete -c ctfer -l auto
+complete -c ctfer -l plan
+complete -c ctfer -l prompt -r
+complete -c ctfer -l resume -r
+complete -c ctfer -s r -l resume -r
+complete -c ctfer -l connect -r
+complete -c ctfer -l no-alt-screen
+complete -c ctfer -l dump-system-prompt
+"#
+            );
+        }
+        "powershell" | "pwsh" => {
+            println!(
+                r#"# ctfer PowerShell completion — add to $PROFILE:
+#   ctfer completions powershell | Out-String | Invoke-Expression
+Register-ArgumentCompleter -CommandName ctfer -ScriptBlock {{
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $cmds = @('server','acp','auth','init','config','doctor','completions')
+  $cmds | Where-Object {{ $_ -like "$wordToComplete*" }} | ForEach-Object {{
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }}
+}}
+"#
+            );
+        }
+        other => anyhow::bail!("unsupported shell '{other}' (use bash|zsh|fish|powershell)"),
+    }
+    Ok(())
+}
+
+fn print_doctor_bundle(configured_path: Option<&std::path::Path>) -> Result<()> {
+    let path = configured_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(kkagent_config::default_config_path);
+    let dir = kkagent_config::default_config_dir();
+    println!("ctfer doctor --bundle (inventory only; nothing collected yet)");
+    println!("Would include:");
+    println!("  - version: {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "  - platform: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    println!("  - config path: {}", path.display());
+    println!("  - config dir: {}", dir.display());
+    println!("  - desensitized config summary (no api keys)");
+    println!("  - doctor health checks");
+    println!(
+        "  - truncated recent logs (if present under {})",
+        dir.join("logs").display()
+    );
+    println!("Would NOT include: transcripts, file contents, secrets, Wiki results");
+    println!("Re-run with confirmation in a future release to write a zip; this inventory is cancel-safe.");
+    Ok(())
+}
+
+fn init_logging(tui_mode: bool) -> Result<()> {
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("kkagent=info".parse().unwrap());
+
+    if tui_mode {
+        let dir = kkagent_config::default_config_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("kkagent.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    Ok(())
+}
+
+async fn run_auth(command: &AuthCommands, config_path: Option<&std::path::Path>) -> Result<()> {
+    match command {
+        AuthCommands::Login {
+            provider,
+            console,
+            no_browser,
+            oauth_host,
+            base_url,
+        } => match provider.as_str() {
+            "kimi" => {
+                let storage = kkagent_oauth::FileTokenStorage::for_key("kimi-code")?;
+                let flow = kkagent_oauth::kimi_oauth_config(oauth_host.as_deref());
+                let device = kkagent_oauth::request_device_authorization(&flow).await?;
+                let verification = device
+                    .verification_uri_complete
+                    .as_deref()
+                    .unwrap_or(&device.verification_uri);
+                println!(
+                    "Open this URL to sign in:\n  {}",
+                    kkagent_oauth::terminal_hyperlink(verification, verification)
+                );
+                println!("Device code: {}", device.user_code);
+                if *no_browser {
+                    println!("(auto-open disabled; open the link above manually)");
+                } else if kkagent_oauth::open_in_browser(verification) {
+                    println!("(opened in your default browser)");
+                } else {
+                    println!("(could not open a browser automatically; open the link above)");
+                }
+                let token = kkagent_oauth::poll_device_token(&flow, &device).await?;
+                storage.save(&token)?;
+                let base_url = base_url
+                    .as_deref()
+                    .unwrap_or(kkagent_oauth::DEFAULT_KIMI_CODE_BASE_URL);
+                provision_managed_kimi_config(
+                    config_path.unwrap_or(&kkagent_config::default_config_path()),
+                    base_url,
+                    oauth_host.as_deref(),
+                    &token.access_token,
+                )
+                .await?;
+                println!("Kimi login succeeded and managed models were written to config.");
+                Ok(())
+            }
+            "anthropic" => run_anthropic_login(config_path, *console, *no_browser).await,
+            other => {
+                anyhow::bail!("unsupported auth provider: {other} (expected `kimi` or `anthropic`)")
+            }
+        },
+        AuthCommands::Logout { provider } => {
+            let storage = kkagent_oauth::FileTokenStorage::for_key(credential_key(provider)?)?;
+            storage.clear()?;
+            println!("{provider} credential removed.");
+            Ok(())
+        }
+        AuthCommands::Status { provider } => {
+            let storage = kkagent_oauth::FileTokenStorage::for_key(credential_key(provider)?)?;
+            let status = match storage.load_result()? {
+                Some(token) if token.expires_at.is_some_and(|at| at <= chrono::Utc::now()) => {
+                    "expired"
+                }
+                Some(_) => "authenticated",
+                None => "not authenticated",
+            };
+            println!("{provider} OAuth: {status}");
+            Ok(())
+        }
+    }
+}
+
+/// 登录 provider 名 -> 本地凭证文件 key。
+fn credential_key(provider: &str) -> Result<&'static str> {
+    match provider {
+        "kimi" => Ok("kimi-code"),
+        "anthropic" => Ok("anthropic-oauth"),
+        other => {
+            anyhow::bail!("unsupported auth provider: {other} (expected `kimi` or `anthropic`)")
+        }
+    }
+}
+
+/// 应用隐私伪装配置到全局运行时（时区/语言中和）。
+fn apply_privacy(config: &AppConfig) {
+    kkagent_config::set_privacy(kkagent_config::PrivacyRuntime::from_config(&config.privacy));
+}
+
+/// Anthropic Claude Code OAuth：PKCE 授权码流程（浏览器授权 + 终端粘贴授权码）。
+async fn run_anthropic_login(
+    config_path: Option<&std::path::Path>,
+    console: bool,
+    no_browser: bool,
+) -> Result<()> {
+    let flow = kkagent_oauth::anthropic_oauth_config(console);
+    let pkce = kkagent_oauth::generate_pkce();
+    let state = kkagent_oauth::generate_state();
+    let url = kkagent_oauth::authorize_url(&flow, &pkce, &state);
+    println!("Open this URL in a browser and authorize:");
+    println!("  {}\n", kkagent_oauth::terminal_hyperlink(&url, &url));
+    if no_browser {
+        println!("(auto-open disabled; open the link above manually)");
+    } else if kkagent_oauth::open_in_browser(&url) {
+        println!("(opened in your default browser)");
+    } else {
+        println!("(could not open a browser automatically; open the link above)");
+    }
+    print!("Paste the authorization code shown after sign-in: ");
+    {
+        use std::io::Write as _;
+        std::io::stdout().flush()?;
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let raw = line.trim();
+    if raw.is_empty() {
+        anyhow::bail!("no authorization code provided");
+    }
+    // 官方回调页展示的可能是 `code#state`，这里取 code 并（若有）校验 state。
+    let mut parts = raw.splitn(2, '#');
+    let code = parts.next().unwrap_or("").trim();
+    if let Some(returned_state) = parts.next() {
+        let returned_state = returned_state.trim();
+        if !returned_state.is_empty() && returned_state != state {
+            anyhow::bail!(
+                "OAuth state mismatch: the pasted code belongs to a different login attempt"
+            );
+        }
+    }
+    let token = kkagent_oauth::exchange_code(&flow, code, &pkce).await?;
+    let storage = kkagent_oauth::FileTokenStorage::for_key("anthropic-oauth")?;
+    storage.save(&token)?;
+    provision_managed_anthropic_config(
+        config_path.unwrap_or(&kkagent_config::default_config_path()),
+        &token.access_token,
+    )
+    .await?;
+    println!("Anthropic login succeeded and managed models were written to config.");
+    Ok(())
+}
+
+async fn hydrate_provider_oauth(config: &mut AppConfig) -> Result<()> {
+    for (name, provider) in &mut config.providers {
+        let Some(oauth) = provider.oauth.as_ref() else {
+            continue;
+        };
+        if provider
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty())
+        {
+            continue;
+        }
+        let storage = kkagent_oauth::FileTokenStorage::for_key(&oauth.key)?;
+        match provider.provider_type.as_str() {
+            "anthropic" => {
+                let flow = kkagent_oauth::anthropic_oauth_config(false);
+                let token = kkagent_oauth::load_fresh_token(&flow, &storage)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "provider {name} requires Anthropic OAuth login; run `kkagent auth login --provider anthropic`"
+                        )
+                    })?;
+                // `sk-ant-oat...` 由 LLM 层识别为 OAuth，改用 Bearer + anthropic-beta。
+                provider.api_key = Some(token.access_token);
+            }
+            _ => {
+                let token =
+                    kkagent_oauth::load_fresh_kimi_token(&storage, oauth.oauth_host.as_deref())
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                        "provider {name} requires Kimi OAuth login; run `kkagent auth login`"
+                    )
+                        })?;
+                provider.api_key = Some(token.access_token);
+                for (header, value) in kkagent_oauth::kimi_identity_headers() {
+                    provider.custom_headers.entry(header).or_insert(value);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn provision_managed_kimi_config(
+    config_path: &std::path::Path,
+    base_url: &str,
+    oauth_host: Option<&str>,
+    access_token: &str,
+) -> Result<()> {
+    let base_url = base_url.trim_end_matches('/');
+    let mut request = reqwest::Client::new()
+        .get(format!("{base_url}/models"))
+        .bearer_auth(access_token)
+        .header("accept", "application/json");
+    for (name, value) in kkagent_oauth::kimi_identity_headers() {
+        request = request.header(name, value);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("Kimi model catalog failed with HTTP {status}: {body}");
+    }
+    let payload: serde_json::Value = serde_json::from_str(&body)?;
+    let models = payload
+        .get("data")
+        .and_then(|data| data.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Kimi model catalog response has no data array"))?;
+    let mut config: AppConfig = if config_path.exists() {
+        toml::from_str(&std::fs::read_to_string(config_path)?)?
+    } else {
+        AppConfig::default()
+    };
+    let provider_name = "managed:kimi-code".to_string();
+    config.providers.insert(
+        provider_name.clone(),
+        kkagent_config::ProviderConfig {
+            provider_type: "kimi".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: Some(base_url.into()),
+            custom_headers: HashMap::new(),
+            oauth: Some(kkagent_config::ProviderOAuthConfig {
+                storage: "file".into(),
+                key: "kimi-code".into(),
+                oauth_host: oauth_host.map(str::to_string),
+            }),
+            first_token_timeout_ms: None,
+            request_timeout_ms: None,
+            extra_fields: Default::default(),
+        },
+    );
+    let mut first_alias = None;
+    for model in models {
+        let Some(id) = model.get("id").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        let context_length = model
+            .get("context_length")
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow::anyhow!("Kimi model {id} has no positive context_length"))?;
+        let mut capabilities = Vec::new();
+        if model
+            .get("supports_tool_use")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+        {
+            capabilities.push("tool_use".into());
+        }
+        if model
+            .get("supports_reasoning")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            capabilities.push("thinking".into());
+        }
+        if model
+            .get("supports_image_in")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            capabilities.push("image_in".into());
+        }
+        if model
+            .get("supports_video_in")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            capabilities.push("video_in".into());
+        }
+        let alias = format!("kimi-code/{id}");
+        first_alias.get_or_insert_with(|| alias.clone());
+        config.models.insert(
+            alias,
+            kkagent_config::ModelConfig {
+                provider: provider_name.clone(),
+                model: id.into(),
+                max_context_size: Some(context_length),
+                max_output_size: None,
+                capabilities,
+                display_name: model
+                    .get("display_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                support_efforts: model
+                    .get("think_efforts")
+                    .and_then(|value| value.get("valid_efforts"))
+                    .and_then(|value| value.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                default_effort: model
+                    .get("think_efforts")
+                    .and_then(|value| value.get("default_effort"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                pricing: None,
+                experimental_adaptive_thinking: false,
+                experimental_vision_proxy: false,
+                experimental_visible_empty_retries: 0,
+                experimental_bad_toolcall_auto_retries: 0,
+                first_token_timeout_ms: None,
+            },
+        );
+    }
+    let first_alias = first_alias.ok_or_else(|| anyhow::anyhow!("Kimi returned no models"))?;
+    if config.default_model.is_none()
+        || config
+            .default_model
+            .as_deref()
+            .is_some_and(|model| model.starts_with("kimi-code/"))
+    {
+        config.default_model = Some(first_alias);
+    }
+    config.validate()?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_private_config(config_path, toml::to_string_pretty(&config)?.as_bytes())?;
+    Ok(())
+}
+
+/// 用 Claude Code OAuth 令牌拉取模型目录，并写入 `managed:anthropic-oauth` provider。
+async fn provision_managed_anthropic_config(
+    config_path: &std::path::Path,
+    access_token: &str,
+) -> Result<()> {
+    let beta = format!(
+        "{},{}",
+        kkagent_oauth::ANTHROPIC_OAUTH_BETA_HEADER,
+        kkagent_oauth::ANTHROPIC_CLAUDE_CODE_BETA
+    );
+    let request = reqwest::Client::new()
+        .get("https://api.anthropic.com/v1/models?limit=1000")
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", beta)
+        .bearer_auth(access_token)
+        .header("accept", "application/json");
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("Anthropic model catalog failed with HTTP {status}: {body}");
+    }
+    let payload: serde_json::Value = serde_json::from_str(&body)?;
+    let models = payload
+        .get("data")
+        .and_then(|data| data.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Anthropic model catalog response has no data array"))?;
+
+    let mut config: AppConfig = if config_path.exists() {
+        toml::from_str(&std::fs::read_to_string(config_path)?)?
+    } else {
+        AppConfig::default()
+    };
+    let provider_name = "managed:anthropic-oauth".to_string();
+    config.providers.insert(
+        provider_name.clone(),
+        kkagent_config::ProviderConfig {
+            provider_type: "anthropic".into(),
+            api_key: None,
+            api_key_env: None,
+            base_url: Some("https://api.anthropic.com".into()),
+            custom_headers: HashMap::new(),
+            oauth: Some(kkagent_config::ProviderOAuthConfig {
+                storage: "file".into(),
+                key: "anthropic-oauth".into(),
+                oauth_host: None,
+            }),
+            first_token_timeout_ms: None,
+            request_timeout_ms: None,
+            extra_fields: Default::default(),
+        },
+    );
+    let mut first_alias = None;
+    for model in models {
+        let Some(id) = model.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let display = model
+            .get("display_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or(id);
+        let alias = format!("{provider_name}/{id}");
+        first_alias.get_or_insert_with(|| alias.clone());
+        config.models.insert(
+            alias,
+            kkagent_config::ModelConfig {
+                provider: provider_name.clone(),
+                model: id.into(),
+                max_context_size: Some(200_000),
+                max_output_size: Some(64_000),
+                capabilities: vec!["tool_use".into(), "thinking".into(), "image_in".into()],
+                display_name: Some(display.to_string()),
+                support_efforts: Vec::new(),
+                default_effort: None,
+                pricing: None,
+                experimental_adaptive_thinking: false,
+                experimental_vision_proxy: false,
+                experimental_visible_empty_retries: 0,
+                experimental_bad_toolcall_auto_retries: 0,
+                first_token_timeout_ms: None,
+            },
+        );
+    }
+    let first_alias = first_alias.ok_or_else(|| anyhow::anyhow!("Anthropic returned no models"))?;
+    if config.default_model.is_none()
+        || config
+            .default_model
+            .as_deref()
+            .is_some_and(|model| model.starts_with("managed:anthropic-oauth/"))
+    {
+        config.default_model = Some(first_alias);
+    }
+    config.validate()?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_private_config(config_path, toml::to_string_pretty(&config)?.as_bytes())?;
+    Ok(())
+}
+
+fn write_private_config(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    use std::io::Write;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+async fn run_tui(
+    mut config: AppConfig,
+    config_path: PathBuf,
+    permission_mode: PermissionMode,
+    plan_mode: bool,
+    resume: Option<Option<String>>,
+    connect: Option<String>,
+    no_alt_screen: bool,
+) -> Result<()> {
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .context("cannot resolve the TUI workspace")?;
+    let is_remote = connect.is_some();
+    if !is_remote && !config.sandbox.is_disabled() {
+        kkagent_tui::ensure_workspace_trust(&mut config, &config_path, &workspace, !no_alt_screen)?;
+    }
+
+    let (event_tx, event_rx) = mpsc::channel::<Frame>(256);
+    let mut resume = resume;
+    let (rpc_client, server_handle, allows_background_detach) = if let Some(endpoint) = connect {
+        let stream =
+            kkagent_rpc::transport::uds::connect_uds(std::path::Path::new(&endpoint)).await?;
+        maybe_auto_resume(&mut resume, true);
+        (RpcClient::new(stream, event_tx), None, true)
+    } else if config.server.standalone {
+        match connect_or_spawn_standalone(&config_path).await {
+            Ok(stream) => {
+                maybe_auto_resume(&mut resume, true);
+                (RpcClient::new(stream, event_tx), None, true)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "standalone server unavailable; falling back to in-process server (Ctrl+B disabled)"
+                );
+                maybe_auto_resume(&mut resume, false);
+                let (client_stream, server_stream) = create_memory_pair();
+                let server_config = Arc::new(config.clone());
+                let server_config_path = config_path.clone();
+                let handle = tokio::spawn(async move {
+                    run_server_handler(server_stream, server_config, server_config_path).await
+                });
+                tokio::task::yield_now().await;
+                (RpcClient::new(client_stream, event_tx), Some(handle), false)
+            }
+        }
+    } else {
+        maybe_auto_resume(&mut resume, false);
+        let (client_stream, server_stream) = create_memory_pair();
+        let server_config = Arc::new(config.clone());
+        let server_config_path = config_path.clone();
+        let handle = tokio::spawn(async move {
+            run_server_handler(server_stream, server_config, server_config_path).await
+        });
+        tokio::task::yield_now().await;
+        (RpcClient::new(client_stream, event_tx), Some(handle), false)
+    };
+
+    let runtime_sandbox_mode = match rpc_client.call("runtime.status", None).await {
+        Ok(status) => status
+            .get("sandbox")
+            .and_then(|sandbox| sandbox.get("mode"))
+            .and_then(|mode| mode.as_str())
+            .map(str::to_string),
+        Err(error) => {
+            tracing::warn!(%error, "failed to read the server sandbox status");
+            None
+        }
+    };
+
+    // A remote server is authoritative about sandboxing. Defer review until
+    // after runtime.status so a disabled remote sandbox never causes a local
+    // trust prompt, while an enabled/unknown one still fails closed.
+    if is_remote
+        && !runtime_sandbox_mode
+            .as_deref()
+            .is_some_and(kkagent_config::SandboxConfig::mode_is_disabled)
+    {
+        kkagent_tui::ensure_workspace_trust(&mut config, &config_path, &workspace, !no_alt_screen)?;
+    }
+
+    let mut tui_config = config;
+    if let Some(mode) = runtime_sandbox_mode {
+        tui_config.sandbox.mode = mode;
+    } else if is_remote {
+        // A local config cannot describe a separately started server. Avoid a
+        // falsely reassuring badge when talking to an older remote instance.
+        tui_config.sandbox.mode = "unknown".into();
+    }
+    tui_config.default_permission_mode = Some(permission_mode.to_string());
+    tui_config.default_plan_mode = plan_mode;
+
+    let client = KkagentClient::new(rpc_client, event_rx);
+    let mut app = TuiApp::new(tui_config, client);
+    app.set_remote_connection(is_remote);
+    app.set_allows_background_detach(allows_background_detach);
+    app.set_config_path(config_path);
+    app.set_use_alt_screen(!no_alt_screen);
+    let result = app.run(resume).await;
+
+    // Only abort an in-process server. Standalone servers outlive the TUI.
+    if let Some(server_handle) = server_handle {
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    result
+}
+
+fn maybe_auto_resume(resume: &mut Option<Option<String>>, server_alive: bool) {
+    if resume.is_some() {
+        return;
+    }
+    let Some(session_id) = kkagent_config::load_active_session() else {
+        return;
+    };
+    if server_alive {
+        if !session_exists(&session_id) {
+            tracing::warn!(%session_id, "Active-session marker references a non-existent session; clearing it");
+            kkagent_config::clear_active_session();
+            return;
+        }
+        if session_resume_unavailable_here(&session_id) {
+            // Starting fresh in another directory is expected, not an error:
+            // skip the resume quietly and keep the marker so the original
+            // directory can still auto-resume this session later.
+            tracing::info!(%session_id, "Active session belongs to an unavailable working directory; starting a new session");
+            return;
+        }
+        tracing::info!(%session_id, "Auto-resuming session from active-session");
+        *resume = Some(Some(session_id));
+        return;
+    }
+    // Stale marker after a dead server: clear it, but still resume history from DB.
+    kkagent_config::clear_active_session();
+    if !session_exists(&session_id) {
+        tracing::warn!(%session_id, "Active-session marker references a non-existent session; starting fresh");
+        return;
+    }
+    if session_resume_unavailable_here(&session_id) {
+        tracing::info!(%session_id, "Active session belongs to an unavailable working directory; starting fresh");
+        return;
+    }
+    eprintln!(
+        "Previous standalone server is gone; in-flight tasks were lost. Restoring conversation history for session {session_id}."
+    );
+    *resume = Some(Some(session_id));
+}
+
+/// Whether resuming `session_id` from the current directory would be rejected by
+/// the server's working-directory check. Auto-resume must stay silent, so we
+/// pre-check with the exact same rules `session.resume` applies and start a new
+/// session instead of surfacing an error to the user. Returns false whenever the
+/// check cannot be performed, leaving the normal resume path in charge.
+fn session_resume_unavailable_here(session_id: &str) -> bool {
+    match std::env::current_dir() {
+        Ok(cwd) => session_resume_unavailable_in(session_id, &cwd),
+        Err(_) => false,
+    }
+}
+
+/// Same check as [`session_resume_unavailable_here`] with an explicit current
+/// directory, so tests don't depend on the process cwd.
+fn session_resume_unavailable_in(session_id: &str, cwd: &std::path::Path) -> bool {
+    if !is_safe_session_id(session_id) {
+        return false;
+    }
+    let stored_working_dir = TranscriptDb::open_default()
+        .ok()
+        .and_then(|db| db.get_session(session_id).ok().flatten())
+        .map(|record| record.working_dir)
+        .or_else(|| {
+            SessionStore::open_default()
+                .get(session_id)
+                .ok()
+                .map(|summary| summary.work_dir)
+        });
+    let Some(stored_working_dir) = stored_working_dir else {
+        return false;
+    };
+    resolve_resume_working_dir(&stored_working_dir, Some(cwd)).is_err()
+}
+
+/// Check whether a session still has a retrievable record (DB or disk store).
+fn session_exists(session_id: &str) -> bool {
+    if is_safe_session_id(session_id) {
+        if let Ok(Some(_)) = TranscriptDb::open_default().and_then(|db| db.get_session(session_id))
+        {
+            return true;
+        }
+        if SessionStore::open_default().get(session_id).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn runtime_socket_path(native_fangida: bool) -> PathBuf {
+    let original = kkagent_config::default_server_socket_path();
+    if native_fangida {
+        original.with_file_name("fangida-agent.sock")
+    } else {
+        original
+    }
+}
+
+fn default_runtime_socket_path() -> PathBuf {
+    runtime_socket_path(std::env::var_os("FANGIDA_ROOT").is_some())
+}
+
+fn resolve_listen_path(listen: Option<String>) -> PathBuf {
+    listen
+        .map(PathBuf::from)
+        .unwrap_or_else(default_runtime_socket_path)
+}
+
+async fn connect_or_spawn_standalone(
+    config_path: &Path,
+) -> anyhow::Result<kkagent_rpc::transport::uds::LocalStream> {
+    let socket_path = default_runtime_socket_path();
+    match kkagent_rpc::transport::uds::try_connect_uds(&socket_path).await {
+        Ok(stream) => Ok(stream),
+        Err(_) => {
+            spawn_standalone_server(&socket_path, config_path)?;
+            wait_for_socket(&socket_path, Duration::from_secs(5)).await
+        }
+    }
+}
+
+fn spawn_standalone_server(socket_path: &Path, config_path: &Path) -> anyhow::Result<()> {
+    if socket_path.exists() {
+        let _ = kkagent_rpc::transport::uds::remove_endpoint(socket_path);
+    }
+    let exe = std::env::current_exe().context("failed to resolve ctfer executable")?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--config")
+        .arg(config_path)
+        .arg("server")
+        .arg("--listen")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Detach from the TUI process group so terminal signals don't kill the server.
+        cmd.process_group(0);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    cmd.spawn()
+        .with_context(|| format!("Failed to spawn standalone server ({})", exe.display()))?;
+    Ok(())
+}
+
+async fn wait_for_socket(
+    path: &Path,
+    timeout: Duration,
+) -> anyhow::Result<kkagent_rpc::transport::uds::LocalStream> {
+    let deadline = Instant::now() + timeout;
+    let mut delay = Duration::from_millis(5);
+    loop {
+        match kkagent_rpc::transport::uds::try_connect_uds(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) if Instant::now() < deadline => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_millis(50));
+                let _ = error;
+            }
+            Err(error) => {
+                anyhow::bail!("Server did not start within {timeout:?}: {error}");
+            }
+        }
+    }
+}
+
+async fn run_server_stop(listen: Option<String>) -> Result<()> {
+    let socket_path = resolve_listen_path(listen);
+    let stream = match kkagent_rpc::transport::uds::try_connect_uds(&socket_path).await {
+        Ok(stream) => stream,
+        Err(_) => anyhow::bail!("ctfer server is not running"),
+    };
+    let (event_tx, _event_rx) = mpsc::channel::<Frame>(1);
+    let client = RpcClient::new(stream, event_tx);
+    match client.call("runtime.shutdown", None).await {
+        Ok(_) => {
+            kkagent_config::clear_active_session();
+            // Wait briefly for the endpoint to disappear.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while socket_path.exists() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            println!("ctfer server stopped");
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!("{error}")),
+    }
+}
+
+/// `kk export-session <id>` — single-session debug bundle for bug analysis.
+///
+/// Runs fully offline against the local data dir (no server, no LLM). The
+/// bundle contains only artifacts belonging to the requested session:
+/// transcript, filtered audit trail, filtered diagnostic log, tool results,
+/// and the on-disk session directory. Partial sources are tolerated and
+/// reported in the manifest rather than failing the export.
+fn run_export_session(session_id: &str, output: Option<&Path>, json: bool) -> Result<()> {
+    use kkagent_core::session::store::SessionStore;
+
+    if session_id.trim().is_empty() {
+        anyhow::bail!("session id must not be empty");
+    }
+
+    let store = SessionStore::open_default();
+    let summary = match store.get(session_id) {
+        Ok(s) => s,
+        Err(_) => {
+            // The session index may be pruned even though the transcript and
+            // the on-disk session directory survived; locate the directory by
+            // scanning the buckets so export still works.
+            let sessions_dir = &store.sessions_dir;
+            let mut found: Option<PathBuf> = None;
+            // Layouts: flat `sessions/<id>` or bucketed `sessions/<bucket>/<id>`.
+            let direct = sessions_dir.join(session_id);
+            if direct.is_dir() {
+                found = Some(direct);
+            } else if let Ok(buckets) = std::fs::read_dir(sessions_dir) {
+                for bucket in buckets.flatten() {
+                    let candidate = bucket.path().join(session_id);
+                    if candidate.is_dir() {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+            }
+            let Some(session_dir) = found else {
+                anyhow::bail!(
+                    "session not found: {session_id} (nothing in session store under {})",
+                    sessions_dir.display()
+                );
+            };
+            kkagent_core::session::store::SessionSummary {
+                id: session_id.to_string(),
+                session_dir: session_dir.to_string_lossy().into_owned(),
+                work_dir: std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                title: None,
+                is_custom_title: false,
+                archived: false,
+                last_prompt: None,
+                first_prompt: None,
+                created_at: 0,
+                updated_at: 0,
+                forked_from: None,
+            }
+        }
+    };
+
+    let output_dir = match output {
+        Some(p) => p.to_path_buf(),
+        None => kkagent_config::default_config_dir()
+            .join("exports")
+            .join(format!(
+                "kkagent-debug-{}-{}",
+                &summary.id[..summary.id.len().min(8)],
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            )),
+    };
+    if output_dir.exists() {
+        anyhow::bail!("output directory already exists: {}", output_dir.display());
+    }
+
+    let result = kkagent_core::export_session_debug_bundle(&summary, &output_dir)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "output_dir": result.output_dir.display().to_string(),
+                "entries": result.entries,
+                "manifest": result.manifest,
+            })
+        );
+    } else {
+        println!(
+            "Exported session {} to {}",
+            summary.id,
+            result.output_dir.display()
+        );
+        println!("  messages:      {:?}", result.manifest.message_count);
+        println!("  audit events:  {:?}", result.manifest.audit_event_count);
+        println!("  log lines:     {:?}", result.manifest.log_line_count);
+        println!("  files:         {}", result.manifest.files.len());
+        if !result.manifest.missing.is_empty() {
+            println!("  missing sources:");
+            for m in &result.manifest.missing {
+                println!("    - {m}");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_server_status(listen: Option<String>, json: bool) -> Result<()> {
+    let socket_path = resolve_listen_path(listen);
+    let stream = match kkagent_rpc::transport::uds::try_connect_uds(&socket_path).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "alive": false,
+                        "socket": socket_path.display().to_string(),
+                        "active_turns": 0,
+                        "client_count": 0,
+                        "uptime_secs": 0,
+                        "pid": serde_json::Value::Null,
+                    })
+                );
+            } else {
+                println!("ctfer server is not running");
+            }
+            std::process::exit(1);
+        }
+    };
+    let (event_tx, _event_rx) = mpsc::channel::<Frame>(1);
+    let client = RpcClient::new(stream, event_tx);
+    let status = client
+        .call("runtime.status", None)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let active_turns = status
+        .get("active_turns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let client_count = status
+        .get("client_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let uptime_secs = status
+        .get("uptime_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let pid = status.get("pid").and_then(|v| v.as_u64());
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "alive": true,
+                "socket": socket_path.display().to_string(),
+                "active_turns": active_turns,
+                "client_count": client_count,
+                "uptime_secs": uptime_secs,
+                "pid": pid,
+            })
+        );
+    } else {
+        let pid_text = pid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".into());
+        println!(
+            "ctfer server is running (pid {pid_text}, uptime {})",
+            format_uptime(uptime_secs)
+        );
+        println!("  active turns: {active_turns}");
+        println!("  connected clients: {client_count}");
+    }
+    Ok(())
+}
+
+fn format_uptime(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Idle-watchdog decision helper (unit-tested).
+fn should_idle_shutdown(
+    idle_timeout: Duration,
+    last_activity_elapsed: Duration,
+    has_active_turns: bool,
+    has_clients: bool,
+) -> bool {
+    if idle_timeout.is_zero() {
+        return false;
+    }
+    if has_active_turns || has_clients {
+        return false;
+    }
+    last_activity_elapsed > idle_timeout
+}
+
+async fn run_print_mode(
+    config: AppConfig,
+    config_path: PathBuf,
+    connect: Option<String>,
+    print_opts: headless::PrintModeOptions,
+) -> Result<()> {
+    let (event_tx, event_rx) = mpsc::channel::<Frame>(256);
+    let (rpc_client, server_handle) = if let Some(endpoint) = connect {
+        let stream =
+            kkagent_rpc::transport::uds::connect_uds(std::path::Path::new(&endpoint)).await?;
+        (RpcClient::new(stream, event_tx), None)
+    } else {
+        let (client_stream, server_stream) = create_memory_pair();
+        let config_arc = Arc::new(config.clone());
+        let handle = tokio::spawn(async move {
+            run_server_handler(server_stream, config_arc, config_path).await
+        });
+        (RpcClient::new(client_stream, event_tx), Some(handle))
+    };
+
+    let mut client = KkagentClient::new(rpc_client, event_rx);
+    let result = run_print_client(&mut client, print_opts).await;
+    if let Some(server_handle) = server_handle {
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+    result
+}
+
+async fn run_print_client(
+    client: &mut KkagentClient,
+    opts: headless::PrintModeOptions,
+) -> Result<()> {
+    // `/goal ...` keeps its dedicated headless driver (goal RPC + exit codes).
+    if opts.prompt.trim().starts_with("/goal") {
+        let permission_mode = opts.permission_mode.unwrap_or(PermissionMode::Manual);
+        let cwd = std::env::current_dir()?.to_string_lossy().to_string();
+        let session_id = client
+            .create_session(Some(&cwd), Some(permission_mode))
+            .await?;
+        let goal_args = opts
+            .prompt
+            .trim()
+            .strip_prefix("/goal")
+            .unwrap_or("")
+            .trim();
+        let exit = run_print_goal(client, &session_id, goal_args).await?;
+        std::process::exit(exit);
+    }
+
+    let headless_opts = opts.resolve();
+    let exit = headless::run(client, headless_opts).await;
+    if exit != 0 {
+        std::process::exit(exit);
+    }
+    Ok(())
+}
+
+async fn session_goal_rpc(
+    requester: &kkagent_client::KkagentRequester,
+    session_id: &str,
+    action: &str,
+    objective: Option<&str>,
+) -> Result<serde_json::Value> {
+    let mut params = serde_json::json!({
+        "session_id": session_id,
+        "action": action,
+    });
+    if let Some(obj) = objective {
+        params
+            .as_object_mut()
+            .unwrap()
+            .insert("objective".into(), serde_json::json!(obj));
+    }
+    requester
+        .rpc_call("session.goal", Some(params))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Headless `/goal` driver: create/manage goal and wait until it leaves `active`.
+async fn run_print_goal(client: &mut KkagentClient, session_id: &str, args: &str) -> Result<i32> {
+    use kkagent_protocol::goal::exit_codes;
+
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    let requester = client.requester();
+
+    match sub {
+        "" | "status" => {
+            let body = session_goal_rpc(&requester, session_id, "status", None).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::SUCCESS_COMPLETE);
+        }
+        "pause" => {
+            let body = session_goal_rpc(&requester, session_id, "pause", None).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::PAUSED);
+        }
+        "resume" => {
+            let _ = session_goal_rpc(&requester, session_id, "resume", None).await?;
+        }
+        "cancel" => {
+            let body = session_goal_rpc(&requester, session_id, "cancel", None).await?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::CANCELLED);
+        }
+        "budget" => {
+            let mut budget_parts = rest.split_whitespace();
+            let unit = budget_parts.next().unwrap_or("");
+            let raw_value = budget_parts.next().unwrap_or("");
+            if unit.is_empty() || raw_value.is_empty() || budget_parts.next().is_some() {
+                anyhow::bail!(
+                    "Usage: /goal budget <turns|tokens|milliseconds|seconds|minutes|hours> <positive-integer|off>"
+                );
+            }
+            let value = if raw_value.eq_ignore_ascii_case("off")
+                || raw_value.eq_ignore_ascii_case("none")
+            {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(raw_value
+                    .parse::<u64>()
+                    .with_context(|| { "goal budget value must be a positive integer or off" })?)
+            };
+            let body = requester
+                .rpc_call(
+                    "session.goal",
+                    Some(serde_json::json!({
+                        "session_id": session_id,
+                        "action": "budget",
+                        "unit": unit,
+                        "value": value,
+                    })),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::SUCCESS_COMPLETE);
+        }
+        "criterion" => {
+            let body = if rest.is_empty() {
+                session_goal_rpc(&requester, session_id, "criterion", None).await?
+            } else {
+                requester
+                    .rpc_call(
+                        "session.goal",
+                        Some(serde_json::json!({
+                            "session_id": session_id,
+                            "action": "criterion",
+                            "text": rest,
+                        })),
+                    )
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+            };
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::SUCCESS_COMPLETE);
+        }
+        "discuss" => {
+            if rest.is_empty() {
+                anyhow::bail!("Usage: /goal discuss <message>");
+            }
+            let body = requester
+                .rpc_call(
+                    "session.goal",
+                    Some(serde_json::json!({
+                        "session_id": session_id,
+                        "action": "discuss",
+                        "text": rest,
+                    })),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            return Ok(exit_codes::SUCCESS_COMPLETE);
+        }
+        "replace" => {
+            if rest.is_empty() {
+                anyhow::bail!("Usage: /goal replace <objective>");
+            }
+            let _ = session_goal_rpc(&requester, session_id, "replace", Some(rest)).await?;
+        }
+        _ => {
+            let objective = if rest.is_empty() { sub } else { args };
+            let _ = session_goal_rpc(&requester, session_id, "create", Some(objective)).await?;
+        }
+    }
+
+    let mut last_summary = serde_json::json!({"goal": null});
+    while let Some(frame) = client.event_rx.recv().await {
+        if let Frame::Event { data, .. } = frame {
+            if let Ok(evt) = serde_json::from_value::<AgentEvent>(data) {
+                match evt {
+                    AgentEvent::MessageDelta { text, .. } => {
+                        print!("{}", text);
+                    }
+                    AgentEvent::GoalUpdated {
+                        goal,
+                        budget,
+                        change,
+                        ..
+                    } => {
+                        last_summary = serde_json::json!({
+                            "goal": goal,
+                            "budget": budget,
+                            "change": change,
+                        });
+                        let status = last_summary
+                            .pointer("/goal/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if status != "active" && change != "created" && change != "resumed" {
+                            println!();
+                            println!("{}", serde_json::to_string_pretty(&last_summary)?);
+                            return Ok(match status {
+                                "blocked" => exit_codes::BLOCKED,
+                                "paused" => exit_codes::PAUSED,
+                                "" if change == "cancelled" => exit_codes::CANCELLED,
+                                _ => exit_codes::SUCCESS_COMPLETE,
+                            });
+                        }
+                        // Only user-initiated cancellation ends the run here;
+                        // goal-tool completion still owes a final summary turn
+                        // (TurnEnd below handles the exit once it lands).
+                        if goal.is_none() && change == "cancelled" {
+                            println!();
+                            println!("{}", serde_json::to_string_pretty(&last_summary)?);
+                            return Ok(exit_codes::CANCELLED);
+                        }
+                    }
+                    AgentEvent::TurnEnd { .. } => {
+                        // Keep waiting while goal remains active (auto-continuation).
+                        let body = session_goal_rpc(&requester, session_id, "status", None).await?;
+                        let status = body
+                            .pointer("/goal/status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if status != "active" {
+                            println!();
+                            println!("{}", serde_json::to_string_pretty(&body)?);
+                            return Ok(match status {
+                                "blocked" => exit_codes::BLOCKED,
+                                "paused" => exit_codes::PAUSED,
+                                "" => exit_codes::SUCCESS_COMPLETE,
+                                _ => exit_codes::SUCCESS_COMPLETE,
+                            });
+                        }
+                    }
+                    AgentEvent::Error { message, .. } => {
+                        eprintln!("Agent error: {message}");
+                        return Ok(exit_codes::ERROR);
+                    }
+                    AgentEvent::LlmRetry {
+                        retry_number,
+                        remaining_seconds,
+                        reason,
+                        ..
+                    } => {
+                        let when = if remaining_seconds == 0 {
+                            "now".to_string()
+                        } else {
+                            format!("in {remaining_seconds}s")
+                        };
+                        eprint!("\rLLM retry #{retry_number} {when}: {reason}");
+                        let _ = std::io::Write::flush(&mut io::stderr());
+                        if remaining_seconds == 0 {
+                            eprintln!();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&last_summary)?);
+    Ok(exit_codes::ERROR)
+}
+
+/// A server is already listening on the socket: start HTTP on that server via
+/// the `runtime.http.start` RPC and report the result, then exit without
+/// touching the running server's sessions.
+async fn attach_http_to_running_server(
+    stream: kkagent_rpc::transport::uds::LocalStream,
+    addr: &str,
+    token: Option<String>,
+) -> Result<()> {
+    let (event_tx, _event_rx) = mpsc::channel::<Frame>(1);
+    let client = RpcClient::new(stream, event_tx);
+    let params = serde_json::json!({
+        "addr": addr,
+        "token": token,
+    });
+    let result = client
+        .call("runtime.http.start", Some(params))
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let address = result
+        .get("address")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(addr);
+    let returned_token = result
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    println!("ctfer server is already running; HTTP attached to it: http://{address}/ui");
+    if !returned_token.is_empty() {
+        println!("HTTP token: {returned_token}");
+    }
+    Ok(())
+}
+
+async fn run_server(
+    config: AppConfig,
+    config_path: PathBuf,
+    listen: Option<String>,
+    http: Option<String>,
+    http_token: Option<String>,
+    http_security: kkagent_rpc::HttpSecurityOptions,
+) -> Result<()> {
+    let socket_path =
+        listen.unwrap_or_else(|| default_runtime_socket_path().to_string_lossy().to_string());
+
+    tracing::info!("Starting server on {}", socket_path);
+    let endpoint_path = std::path::PathBuf::from(&socket_path);
+
+    // If a server is already running, attach the HTTP service to it via RPC
+    // instead of failing — the running server's sessions stay uninterrupted.
+    if http.is_some() {
+        if let Ok(stream) = kkagent_rpc::transport::uds::try_connect_uds(&endpoint_path).await {
+            let addr = http.clone().expect("checked is_some above");
+            return attach_http_to_running_server(stream, &addr, http_token).await;
+        }
+    }
+
+    let listener = kkagent_rpc::transport::uds::bind_uds(&endpoint_path)?;
+    let _endpoint_guard = LocalEndpointGuard(endpoint_path.clone());
+
+    let idle_timeout = Duration::from_secs(config.server.idle_timeout_secs);
+    let config_arc = Arc::new(config);
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (state_tx, state_rx) = watch::channel(None::<Result<Arc<ServerState>, String>>);
+
+    let init_config = config_arc.clone();
+    let init_config_path = config_path;
+    let init_shutdown = shutdown_tx.clone();
+    let init_http_security = http_security;
+    tokio::spawn(async move {
+        match build_server_state_with_shutdown(
+            init_config,
+            init_config_path,
+            init_shutdown,
+            init_http_security,
+            None,
+        )
+        .await
+        {
+            Ok(state) => {
+                let _ = state_tx.send(Some(Ok(state)));
+            }
+            Err(error) => {
+                tracing::error!("Server state init failed: {error}");
+                let _ = state_tx.send(Some(Err(error.to_string())));
+            }
+        }
+    });
+
+    let mut state_wait = state_rx.clone();
+    let http_setup = async {
+        let state = wait_for_server_state(&mut state_wait)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        if let Some(addr) = http {
+            let backend = Arc::new(AgentHttpBackend {
+                state: state.clone(),
+            });
+            match state.http_runtime.start(backend, &addr, http_token).await {
+                Ok(Some(_)) => {
+                    recover_durable_turns(Arc::new(AgentHttpBackend {
+                        state: state.clone(),
+                    }))
+                    .await;
+                }
+                Ok(None) => {
+                    tracing::warn!("HTTP server already running; ignoring --http {addr}");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok::<_, anyhow::Error>(state)
+    };
+
+    // Race: serve accepts immediately while HTTP setup (and state init) continue.
+    let mut shared_state: Option<Arc<ServerState>> = None;
+    let mut last_activity = Instant::now();
+    let mut http_setup = std::pin::pin!(http_setup);
+    let mut http_setup_done = false;
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                last_activity = Instant::now();
+                let (stream, _) = accepted?;
+                let mut rx = state_rx.clone();
+                tokio::spawn(async move {
+                    let state = match wait_for_server_state(&mut rx).await {
+                        Ok(state) => state,
+                        Err(error) => {
+                            tracing::error!("Rejecting client; server init failed: {error}");
+                            return;
+                        }
+                    };
+                    state.client_count.fetch_add(1, Ordering::SeqCst);
+                    run_server_handler_with_state(stream, state.clone()).await;
+                    state.client_count.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            setup = &mut http_setup, if !http_setup_done => {
+                http_setup_done = true;
+                let state = setup?;
+                shared_state = Some(state);
+                last_activity = Instant::now();
+            }
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    tracing::info!("Shutdown requested");
+                    break;
+                }
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                tracing::info!("Shutdown signal received");
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(60)), if http_setup_done => {
+                let Some(state) = shared_state.as_ref() else {
+                    last_activity = Instant::now();
+                    continue;
+                };
+                let has_active_turns = state.has_active_turns().await;
+                let has_clients = state.client_count() > 0;
+                if has_active_turns || has_clients {
+                    last_activity = Instant::now();
+                    continue;
+                }
+                if should_idle_shutdown(
+                    idle_timeout,
+                    last_activity.elapsed(),
+                    false,
+                    false,
+                ) {
+                    tracing::info!("Server idle for {:?}, shutting down", idle_timeout);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(state) = shared_state {
+        state.shutdown().await;
+    } else if let Some(Ok(state)) = state_rx.borrow().clone() {
+        state.shutdown().await;
+    }
+    Ok(())
+}
+
+async fn wait_for_server_state(
+    rx: &mut watch::Receiver<Option<Result<Arc<ServerState>, String>>>,
+) -> Result<Arc<ServerState>, String> {
+    loop {
+        if let Some(ready) = rx.borrow().clone() {
+            return ready;
+        }
+        rx.changed()
+            .await
+            .map_err(|_| "server init dropped".to_string())?;
+    }
+}
+
+struct AgentHttpBackend {
+    state: Arc<ServerState>,
+}
+
+/// Running HTTP server spawned by `--http` startup or `runtime.http.start`.
+struct HttpServerHandle {
+    task: tokio::task::JoinHandle<()>,
+    /// Actual bound address (the requested port may be 0 for ephemeral).
+    address: String,
+    token: Option<String>,
+}
+
+/// Address + token snapshot returned after starting the HTTP server.
+#[derive(Debug, Clone)]
+struct HttpServerInfo {
+    address: String,
+    token: Option<String>,
+}
+
+/// Owns the lifecycle of the runtime HTTP / Web UI server.
+///
+/// Shared by `--http` startup and the `runtime.http.start` RPC so both paths
+/// apply the same security policy and never run two servers at once.
+struct HttpServerManager {
+    security: kkagent_rpc::HttpSecurityOptions,
+    durable: kkagent_rpc::DurableHttpStore,
+    current: Mutex<Option<HttpServerHandle>>,
+}
+
+impl HttpServerManager {
+    fn new(
+        security: kkagent_rpc::HttpSecurityOptions,
+        durable: kkagent_rpc::DurableHttpStore,
+    ) -> Self {
+        Self {
+            security,
+            durable,
+            current: Mutex::new(None),
+        }
+    }
+
+    /// Spawn the HTTP server if none is running. Returns `None` when one is.
+    async fn start(
+        &self,
+        backend: Arc<dyn kkagent_rpc::HttpBackend>,
+        addr: &str,
+        token: Option<String>,
+    ) -> Result<Option<HttpServerInfo>, anyhow::Error> {
+        let mut guard = self.current.lock().await;
+        if guard.is_some() {
+            return Ok(None);
+        }
+        let token = token.filter(|value| !value.trim().is_empty());
+        // bind_http enforces the spec rule: non-loopback addresses require a token.
+        let listener = kkagent_rpc::bind_http(addr, token.as_deref()).await?;
+        let address = listener
+            .local_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| addr.to_string());
+        let durable_http = self.durable.clone();
+        let security = self.security.clone();
+        let serve_token = token.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            if let Err(error) =
+                kkagent_rpc::serve_http_listener_with_backend_security_and_persistence(
+                    listener,
+                    backend,
+                    serve_token,
+                    security,
+                    durable_http,
+                    Some(ready_tx),
+                )
+                .await
+            {
+                tracing::error!("HTTP server error: {error}");
+            }
+        });
+        if ready_rx.await.is_err() {
+            task.abort();
+            let _ = task.await;
+            anyhow::bail!("HTTP server stopped before initialization");
+        }
+        tracing::info!("HTTP server listening on http://{address}");
+        *guard = Some(HttpServerHandle {
+            task,
+            address: address.clone(),
+            token: token.clone(),
+        });
+        Ok(Some(HttpServerInfo { address, token }))
+    }
+
+    /// Abort the running HTTP server, if any. Returns its address.
+    async fn stop(&self) -> Result<String, String> {
+        let handle = self
+            .current
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| "HTTP server is not running".to_string())?;
+        handle.task.abort();
+        let _ = handle.task.await;
+        tracing::info!("HTTP server on {} stopped", handle.address);
+        Ok(handle.address)
+    }
+
+    /// Abort without reporting — used during server shutdown.
+    async fn abort(&self) {
+        if let Some(handle) = self.current.lock().await.take() {
+            handle.task.abort();
+        }
+    }
+
+    /// Snapshot for `runtime.http.status`.
+    async fn status(&self) -> serde_json::Value {
+        match self.current.lock().await.as_ref() {
+            Some(handle) => serde_json::json!({
+                "running": true,
+                "address": handle.address,
+                "token_set": handle.token.is_some(),
+            }),
+            None => serde_json::json!({
+                "running": false,
+                "address": serde_json::Value::Null,
+                "token_set": false,
+            }),
+        }
+    }
+}
+
+struct AgentAcpHost {
+    state: Arc<ServerState>,
+}
+
+async fn initialize_session_context(state: &ServerState, session: &mut Session) {
+    session.image_config = state.config().image.clone();
+    session.inject_working_directory_context();
+    session.inject_workspace_instructions().await;
+    session.inject_current_time_context();
+    session.attach_workspace_concurrency_guard();
+    append_composed_prompt_sections(&state.skills, &state.plugins, session).await;
+}
+
+/// Append the workspace-composed prompt sections (skills catalog, plugin
+/// prompts) that every session shares, regardless of entry point.
+async fn append_composed_prompt_sections(
+    skills: &kkagent_tools::SkillCatalog,
+    plugins: &kkagent_core::PluginManager,
+    session: &mut Session,
+) {
+    if !session
+        .system_prompt
+        .contains("# Native Fangida binary analysis")
+    {
+        session
+            .system_prompt
+            .push_str(kkagent_fangida::SYSTEM_PROMPT);
+    }
+    let skill_section = skills
+        .catalog_prompt_section_for(&session.working_dir)
+        .await;
+    if !skill_section.is_empty() {
+        session.system_prompt.push_str(&skill_section);
+    }
+    let plugin_section = plugins.prompt_append_all().await;
+    if !plugin_section.is_empty() {
+        session.system_prompt.push_str(&plugin_section);
+    }
+}
+
+/// Print the fully composed system prompt for the current workspace and exit,
+/// without contacting any model or writing session state.
+///
+/// Composes through the same code path a real session uses. The session is
+/// built with `Session::for_subagent`, so the session store is never touched;
+/// the workspace concurrency lease is RAII and cleans itself up on drop.
+async fn run_dump_system_prompt(config_path: Option<&Path>) -> Result<()> {
+    let config = load_config(config_path)?;
+    apply_privacy(&config);
+    let working_dir = std::env::current_dir().context("failed to resolve current directory")?;
+
+    let (skills, plugins) = {
+        let plugins_dir = kkagent_config::default_config_dir().join("plugins");
+        tokio::join!(
+            kkagent_tools::SkillCatalog::configured(
+                &working_dir,
+                &config.extra_skill_dirs,
+                config.merge_all_available_skills,
+            ),
+            kkagent_core::PluginManager::discover(&plugins_dir),
+        )
+    };
+    // `--dump-system-prompt` must reflect plugin persona replacement too.
+    // Sync BEFORE creating the session: the base prompt is fixed at
+    // `Session::for_subagent` construction time.
+    kkagent_core::plugin_overrides::sync_system_prompt_override(&plugins).await;
+    skills.set_disabled(config.disabled_skills.clone()).await;
+
+    let mut session = Session::for_subagent(
+        "dump-system-prompt".to_string(),
+        working_dir.clone(),
+        PermissionMode::default(),
+        config
+            .default_model_alias()
+            .unwrap_or("default")
+            .to_string(),
+    );
+    session.image_config = config.image.clone();
+    session.inject_working_directory_context();
+    session.inject_workspace_instructions().await;
+    session.inject_current_time_context();
+    session.attach_workspace_concurrency_guard();
+
+    append_composed_prompt_sections(&skills, &plugins, &mut session).await;
+
+    print!("{}", session.effective_system_prompt());
+    use std::io::Write;
+    io::stdout().flush()?;
+
+    // Tool inventory for debugging: mirror `build_turn_tool_registry` (the
+    // main-session path) closely enough for offline inspection — built-ins,
+    // subagent/task tools, Goal / Skill / Web / Cron, MCP-bridged tools, then
+    // plugin overrides last. The managers below are throwaway instances: only
+    // name / description / disclosure are printed and every definition is
+    // static, so the output matches what a real turn would register.
+    let mut tools = kkagent_tools::ToolRegistry::new();
+    kkagent_tools::register_builtin_tools(&mut tools);
+    kkagent_fangida::register_tools(&mut tools);
+    let subagent_mgr = Arc::new(kkagent_protocol::subagent::SubagentManager::new(
+        config.subagent.effective_max_concurrent(),
+    ));
+    let launch: kkagent_tools::builtin::task::SubagentLaunchFn =
+        Arc::new(|_config: kkagent_protocol::subagent::SubagentConfig, _interrupt| {});
+    // Mirror the real-turn path: external plugin profiles participate in the
+    // Agent tool's profile enum so offline inspection matches what a live
+    // turn registers.
+    let external_subagents = plugins.external_subagents().await;
+    let external_profiles = &external_subagents.0;
+    for conflict in &external_subagents.1 {
+        eprintln!(
+            "warning: external subagent type `{conflict}` declared by multiple plugins; first wins"
+        );
+    }
+    kkagent_tools::register_subagent_tools(
+        &mut tools,
+        subagent_mgr,
+        launch,
+        None,
+        config.tools.clone(),
+        external_profiles
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.description.clone()))
+            .collect(),
+    );
+    tools.register(Arc::new(kkagent_tools::builtin::GoalTool::new(Arc::new(
+        kkagent_protocol::goal::GoalManager::new(),
+    ))));
+    tools.register(Arc::new(kkagent_tools::builtin::SkillTool::new(Arc::new(
+        skills,
+    ))));
+    let mut web_cfg = kkagent_tools::WebServicesConfig::from_app(&config);
+    let (svc_overrides, _svc_losers) = plugins.service_overrides().await;
+    web_cfg.merge_plugin_overrides(&kkagent_config::ServicesConfig {
+        web_search: svc_overrides.web_search,
+        web_fetch: svc_overrides.web_fetch,
+        moonshot_search: None,
+        moonshot_fetch: None,
+    });
+    if let Some(web) = kkagent_tools::builtin::WebTool::try_new(Arc::new(web_cfg)) {
+        tools.register(Arc::new(web));
+    }
+    tools.register(Arc::new(kkagent_tools::builtin::CronTool::new(Arc::new(
+        kkagent_tools::CronManager::default(),
+    ))));
+    let mcp_configs = combined_mcp_servers(&config, &plugins).await;
+    if !mcp_configs.is_empty() {
+        let mcp = Arc::new(McpManager::new(mcp_configs));
+        // connect_all already warns per-server on failure and keeps going;
+        // a total failure only means fewer MCP tools in the printed list.
+        let _ = mcp.connect_all().await;
+        register_mcp_tools(&mut tools, &mcp).await;
+    }
+    let overrides = plugins.tool_overrides().await;
+    if !overrides.is_empty() {
+        let policy = config.plugins.clone();
+        let skipped = kkagent_core::plugin_overrides::apply_plugin_tool_overrides(
+            &mut tools, &overrides, &plugins, &policy,
+        )
+        .await;
+        for (builtin, reason) in skipped {
+            eprintln!("warning: plugin tool override for `{builtin}` skipped: {reason}");
+        }
+    }
+
+    let defs = tools.tool_definitions();
+    println!("\n===== TOOLS ({} registered) =====", defs.len());
+    for def in &defs {
+        let deferred = matches!(def.disclosure, kkagent_tools::ToolDisclosure::Deferred);
+        println!(
+            "- {}{}: {}",
+            def.name,
+            if deferred { " [deferred]" } else { "" },
+            def.description
+        );
+    }
+    io::stdout().flush()?;
+
+    // Ephemeral subagent scratch dir (SessionCreateSource::Subagent) — remove
+    // it on every exit path so temp storage never accumulates.
+    let _ = std::fs::remove_dir_all(session.session_dir());
+    Ok(())
+}
+
+async fn ensure_session_loaded(state: &Arc<ServerState>, session_id: &str) -> Result<(), String> {
+    // Serialize cold loads, and inspect both maps under the same lock order
+    // used by checkout/checkin. An active turn owns the original Session and
+    // its control handles must never be replaced with a resumed copy.
+    let _load_guard = state.session_load_lock.lock().await;
+    {
+        let sessions = state.sessions.lock().await;
+        let in_flight = state.in_flight_views.lock().await;
+        if sessions.contains_key(session_id) || in_flight.contains_key(session_id) {
+            return Ok(());
+        }
+    }
+    let (record, messages) = {
+        let database = state.transcript.lock().await;
+        let record = database
+            .get_session(session_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "session not found".to_string())?;
+        let records = database
+            .load_messages(session_id)
+            .map_err(|error| error.to_string())?;
+        (record, messages_from_records(&records))
+    };
+    let permission_mode = state
+        .config()
+        .effective_permission_mode()
+        .parse()
+        .unwrap_or_default();
+    let model = if record.model.is_empty() {
+        state
+            .config()
+            .default_model_alias()
+            .unwrap_or("default")
+            .to_string()
+    } else {
+        record.model
+    };
+    let fallback_model = SessionFallbackModel::from_persisted(record.fallback_model.as_deref());
+    let mut session = Session::resume(
+        session_id.to_string(),
+        PathBuf::from(record.working_dir),
+        permission_mode,
+        model,
+    );
+    session.set_fallback_model(fallback_model);
+    initialize_session_context(state, &mut session).await;
+    session.messages = messages;
+    session.persisted_message_count = session.messages.len();
+    if let Some(title) = record.title {
+        let _ = session.set_title_persisted(title);
+    }
+    session.services.create_source = SessionCreateSource::Resume;
+    session.services.on_created().await;
+    state
+        .interrupt_flags
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.interrupted.clone());
+    state
+        .model_aliases
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.model_alias.clone());
+    state
+        .fallback_models
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.fallback_model.clone());
+    state
+        .permission_modes
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.permission_mode.clone());
+    state
+        .plan_mode_requests
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.plan_mode_requested.clone());
+    state
+        .approval_txs
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.approval_tx.clone());
+    state
+        .question_txs
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.question_tx.clone());
+    state
+        .steer_mailboxes
+        .lock()
+        .await
+        .insert(session_id.to_string(), session.steer_mailbox.clone());
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session_id.to_string(), session);
+    Ok(())
+}
+
+/// Shared teardown for `sessions.delete` / `sessions.discard`: archive the
+/// transcript record, evict in-memory runtime state and close services.
+async fn remove_session_runtime(state: &Arc<ServerState>, session_id: &str) {
+    kkagent_fangida::close_session(session_id).await;
+    {
+        let db = state.transcript.lock().await;
+        let _ = db.archive_session(session_id);
+    }
+    let removed = state.sessions.lock().await.remove(session_id);
+    state.interrupt_flags.lock().await.remove(session_id);
+    state.model_aliases.lock().await.remove(session_id);
+    state.fallback_models.lock().await.remove(session_id);
+    state.permission_modes.lock().await.remove(session_id);
+    state.plan_mode_requests.lock().await.remove(session_id);
+    state.approval_txs.lock().await.remove(session_id);
+    state.question_txs.lock().await.remove(session_id);
+    state.steer_mailboxes.lock().await.remove(session_id);
+    state.active_btw_sessions.lock().await.remove(session_id);
+    state.drop_goal(session_id).await;
+    state.goal_judge_records.lock().await.remove(session_id);
+    state.judge_chat_history.lock().await.remove(session_id);
+    state.judge_chat_locks.lock().await.remove(session_id);
+    if let Some(session) = removed {
+        session.services.on_close(SessionCloseReason::Exit).await;
+    }
+}
+
+async fn recover_durable_turns(backend: Arc<AgentHttpBackend>) {
+    let turns = match backend.state.durable_http.recoverable_turns() {
+        Ok(turns) => turns,
+        Err(error) => {
+            tracing::error!("Failed to load durable turn queue: {error}");
+            return;
+        }
+    };
+    for turn in turns {
+        tracing::warn!(task_id = %turn.task_id, session_id = %turn.session_id, attempts = turn.attempts, "Recovering durable turn");
+        let (text, images) = turn.message_input();
+        if let Err(error) = kkagent_rpc::HttpBackend::post_message(
+            backend.as_ref(),
+            &turn.session_id,
+            &text,
+            &images,
+            Some(&turn.task_id),
+        )
+        .await
+        {
+            let _ = backend
+                .state
+                .durable_http
+                .finish_turn(&turn.task_id, "failed", Some(&error));
+        }
+    }
+}
+
+/// High-entropy token generated when no HTTP token is supplied.
+fn generate_http_token() -> String {
+    format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+}
+
+/// Load a persisted auto-generated HTTP token, or generate and persist a new one.
+///
+/// When no explicit `--http-token` / `KKAGENT_HTTP_TOKEN` is supplied, the server
+/// auto-generates a high-entropy token. Persisting it to `~/.kkagent/http_token`
+/// keeps the token stable across server restarts so that browsers which already
+/// authenticated don't need to re-enter the token.
+fn load_or_generate_http_token() -> String {
+    let path = kkagent_config::default_config_dir().join("http_token");
+    // Try to reuse a previously persisted token.
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    // Generate a new token and persist it for future restarts.
+    let token = generate_http_token();
+    if let Err(error) = persist_http_token(&path, &token) {
+        tracing::warn!(
+            "Failed to persist HTTP token to {}: {error}; token will change on next restart",
+            path.display()
+        );
+    }
+    token
+}
+
+/// Write the HTTP token to disk with restrictive permissions (0600 on Unix).
+fn persist_http_token(path: &Path, token: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("creating config directory")?;
+    }
+    std::fs::write(path, token).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+async fn recover_subagents(state: Arc<ServerState>) {
+    let configs = match state.subagents.recoverable_configs().await {
+        Ok(configs) => configs,
+        Err(error) => {
+            tracing::error!("Failed to load durable subagents: {error}");
+            return;
+        }
+    };
+    for config in &configs {
+        let agent_id = config.agent_id.clone();
+        if let Err(error) = state.subagents.resume(&agent_id).await {
+            tracing::error!("Failed to claim recovered subagent {agent_id}: {error}");
+            // Claim failed (e.g. concurrency cap) — this agent won't run, so
+            // its leftover worktree (if any) is an orphan. Clean it up.
+            kkagent_tools::git_worktree::cleanup_worktree(std::path::Path::new(
+                &config.working_dir,
+            ))
+            .await;
+            continue;
+        }
+        let manager = state.subagents.clone();
+        let app_config = state.config();
+        let web = state.web.read().await.clone();
+        let abort_manager = manager.clone();
+        let abort_agent_id = agent_id.clone();
+        let config = config.clone();
+        let join = tokio::spawn(async move {
+            match kkagent_core::run_subagent_mirrored(
+                app_config,
+                web,
+                config,
+                PermissionMode::Auto,
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(result) => manager.complete(&agent_id, result).await,
+                Err(error) => manager.fail(&agent_id, error.to_string()).await,
+            }
+        });
+        let abort = join.abort_handle();
+        abort_manager.set_abort_handle(&abort_agent_id, abort).await;
+    }
+
+    // Orphan worktree sweep (issues/subagent_issues.md #2 residual):
+    // agents killed by SIGKILL / power loss leave worktrees behind with no
+    // running process to clean them up. Sweep any worktree whose id isn't
+    // among the agents we just recovered (those are now actively running and
+    // will clean up their own worktree on exit).
+    if kkagent_tools::git_worktree::worktree_enabled() {
+        let alive_ids: Vec<String> = state
+            .subagents
+            .list_running()
+            .await
+            .into_iter()
+            .map(|s| s.agent_id)
+            .collect();
+        if let Ok(repo) = std::env::current_dir() {
+            kkagent_tools::git_worktree::sweep_orphan_worktrees(&repo, &alive_ids).await;
+        }
+    }
+}
+
+async fn fire_session_hook(
+    state: &ServerState,
+    event: kkagent_mcp::HookEvent,
+    session_id: &str,
+    workspace: &Path,
+) {
+    let _ = state
+        .hooks
+        .fire(
+            event,
+            &serde_json::json!({
+                "session_id": session_id,
+                "workspace": workspace,
+            }),
+        )
+        .await;
+}
+
+#[async_trait::async_trait]
+impl kkagent_acp::AcpHost for AgentAcpHost {
+    async fn create_session(&self, session_id: &str, cwd: &str) -> Result<(), String> {
+        if session_id.is_empty() {
+            return Err("session id must not be empty".into());
+        }
+        let working_dir = std::fs::canonicalize(cwd)
+            .map_err(|e| format!("invalid ACP working directory {cwd}: {e}"))?;
+        let model = self
+            .state
+            .config()
+            .default_model_alias()
+            .ok_or_else(|| "default_model is not configured".to_string())?
+            .to_string();
+        let permission_mode = self
+            .state
+            .config()
+            .effective_permission_mode()
+            .parse()
+            .map_err(|_| "invalid default permission mode".to_string())?;
+        let mut session = Session::new(
+            session_id.to_string(),
+            working_dir.clone(),
+            permission_mode,
+            model.clone(),
+        );
+        initialize_session_context(&self.state, &mut session).await;
+        {
+            let db = self.state.transcript.lock().await;
+            db.create_session(session_id, &model, &working_dir.to_string_lossy())
+                .map_err(|e| e.to_string())?;
+        }
+        session.services.on_created().await;
+        fire_session_hook(
+            &self.state,
+            kkagent_mcp::HookEvent::SessionStart,
+            &session.id,
+            &session.working_dir,
+        )
+        .await;
+        self.state
+            .interrupt_flags
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.interrupted.clone());
+        self.state
+            .model_aliases
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.model_alias.clone());
+        self.state
+            .fallback_models
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.fallback_model.clone());
+        self.state
+            .permission_modes
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.permission_mode.clone());
+        self.state
+            .plan_mode_requests
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.plan_mode_requested.clone());
+        self.state
+            .approval_txs
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.approval_tx.clone());
+        self.state
+            .question_txs
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.question_tx.clone());
+        self.state
+            .steer_mailboxes
+            .lock()
+            .await
+            .insert(session_id.to_string(), session.steer_mailbox.clone());
+        self.state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), session);
+        Ok(())
+    }
+
+    async fn prompt(&self, session_id: &str, text: &str) -> Result<serde_json::Value, String> {
+        if text.trim().is_empty() {
+            return Err("prompt must not be empty".into());
+        }
+        let _turn_permit = self.state.turn_locks.try_acquire(session_id).await?;
+        {
+            let mut sessions = self.state.sessions.lock().await;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "session not found".to_string())?;
+            session.add_user_message(text.to_string());
+        }
+        run_http_turn(self.state.clone(), session_id, None)
+            .await
+            .map_err(|e| e.to_string())?;
+        let sessions = self.state.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session disappeared after turn".to_string())?;
+        let output = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ChatContent::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        Ok(serde_json::json!({
+            "stopReason": "end_turn",
+            "sessionId": session_id,
+            "content": [{"type": "text", "text": output}],
+        }))
+    }
+
+    async fn load_session(&self, session_id: &str, cwd: &str) -> Result<(), String> {
+        ensure_session_loaded(&self.state, session_id).await?;
+        if let Err(error) = std::fs::canonicalize(cwd) {
+            tracing::warn!("ACP session/load cwd invalid: {error}");
+        }
+        Ok(())
+    }
+
+    fn supports_load_session(&self) -> bool {
+        true
+    }
+
+    async fn session_history(&self, session_id: &str) -> Result<Vec<serde_json::Value>, String> {
+        let records = {
+            let database = self.state.transcript.lock().await;
+            database
+                .load_messages(session_id)
+                .map_err(|e| e.to_string())?
+        };
+        let mut history = Vec::with_capacity(records.len());
+        for record in records {
+            let Ok(blocks) =
+                serde_json::from_str::<Vec<kkagent_llm::ChatContent>>(&record.content_json)
+            else {
+                continue;
+            };
+            let mapped: Vec<serde_json::Value> = blocks
+                .iter()
+                .map(|block| match block {
+                    kkagent_llm::ChatContent::Text { text } => serde_json::json!({
+                        "type": "text", "text": text,
+                    }),
+                    kkagent_llm::ChatContent::Image { media_type, data } => serde_json::json!({
+                        "type": "image", "data": data, "mimeType": media_type,
+                    }),
+                    _ => serde_json::json!({"type": "text", "text": "[non-text content]"}),
+                })
+                .collect();
+            if mapped.is_empty() {
+                continue;
+            }
+            history.push(serde_json::json!({
+                "role": if record.role == "assistant" { "assistant" } else { "user" },
+                "blocks": mapped,
+            }));
+        }
+        Ok(history)
+    }
+
+    async fn cancel(&self, session_id: &str) -> Result<(), String> {
+        let flag = self
+            .state
+            .interrupt_flags
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "session not found".to_string())?;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.state.abort_registry.lock().await.remove(session_id) {
+            handle.abort();
+        }
+        Ok(())
+    }
+
+    async fn set_mode(&self, session_id: &str, mode: &str) -> Result<(), String> {
+        match mode {
+            "agent" | "plan" => {
+                let mut sessions = self.state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| "session not found".to_string())?;
+                session
+                    .set_plan_mode_persisted(mode == "plan")
+                    .map_err(|error| error.to_string())
+            }
+            "manual" | "yolo" | "auto" => {
+                let perm = mode.parse::<PermissionMode>().map_err(|e| e.to_string())?;
+                if let Some(arc) = self.state.permission_modes.lock().await.get(session_id) {
+                    *arc.lock().unwrap_or_else(|e| e.into_inner()) = perm;
+                    return Ok(());
+                }
+                let sessions = self.state.sessions.lock().await;
+                let session = sessions
+                    .get(session_id)
+                    .ok_or_else(|| "session not found".to_string())?;
+                session.set_permission_mode(perm);
+                Ok(())
+            }
+            _ => Err(format!("unsupported ACP mode: {mode}")),
+        }
+    }
+
+    async fn set_model(&self, session_id: &str, model: &str) -> Result<(), String> {
+        if self.state.config().resolve_model(model).is_none() {
+            return Err(format!("unknown model alias: {model}"));
+        }
+        let aliases = self.state.model_aliases.lock().await;
+        let alias = aliases
+            .get(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        *alias.lock().unwrap_or_else(|e| e.into_inner()) = model.to_string();
+        drop(aliases);
+        if let Some(session) = self.state.sessions.lock().await.get(session_id) {
+            session.set_model_alias(model.to_string());
+        }
+        self.state
+            .transcript
+            .lock()
+            .await
+            .set_model(session_id, model)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn respond_approval(&self, params: &serde_json::Value) -> Result<(), String> {
+        let id = params
+            .get("approvalId")
+            .or_else(|| params.get("approval_id"))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "missing approvalId".to_string())?;
+        // Official ACP flow sends {"approve": bool} from the
+        // session/request_permission outcome; legacy flow sends a decision
+        // string. Support both.
+        let decision = if let Some(approve) = params.get("approve").and_then(|v| v.as_bool()) {
+            if approve {
+                kkagent_protocol::ApprovalDecision::Approved
+            } else {
+                kkagent_protocol::ApprovalDecision::Rejected
+            }
+        } else {
+            match params
+                .get("decision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("cancelled")
+            {
+                "approved" | "approve" | "allow" => kkagent_protocol::ApprovalDecision::Approved,
+                "rejected" | "reject" | "deny" => kkagent_protocol::ApprovalDecision::Rejected,
+                _ => kkagent_protocol::ApprovalDecision::Cancelled,
+            }
+        };
+        let scope = match params
+            .get("scope")
+            .or_else(|| params.get("optionId"))
+            .or_else(|| params.get("option_id"))
+            .and_then(|value| value.as_str())
+        {
+            Some("allow_always") | Some("always") | Some("session") => {
+                Some(kkagent_protocol::ApprovalScope::Always)
+            }
+            Some("turn") => Some(kkagent_protocol::ApprovalScope::Turn),
+            Some("once") => Some(kkagent_protocol::ApprovalScope::Once),
+            _ => None,
+        };
+        let response = kkagent_protocol::ApprovalResponse {
+            approval_id: id.to_string(),
+            decision,
+            scope,
+            feedback: params
+                .get("feedback")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            selected_label: params
+                .get("selected_label")
+                .or_else(|| params.get("selectedLabel"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        };
+        // Deliver only to the session that owns the approval: broadcasting
+        // to every session would cross-wire concurrent turns.
+        let sid = params
+            .get("session_id")
+            .or_else(|| params.get("sessionId"))
+            .and_then(|value| value.as_str());
+        let senders = self.state.approval_txs.lock().await;
+        match sid {
+            Some(sid) if !sid.is_empty() => {
+                if let Some(sender) = senders.get(sid) {
+                    let _ = sender.try_send(response);
+                } else {
+                    return Err(format!("session not found: {sid}"));
+                }
+            }
+            _ => {
+                for sender in senders.values() {
+                    let _ = sender.try_send(response.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn respond_question(&self, params: &serde_json::Value) -> Result<(), String> {
+        let id = params
+            .get("questionId")
+            .or_else(|| params.get("question_id"))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "missing questionId".to_string())?;
+        let response = kkagent_protocol::QuestionResponse {
+            question_id: id.to_string(),
+            selected_option_ids: params
+                .get("selectedOptionIds")
+                .or_else(|| params.get("selected_option_ids"))
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            free_text: params
+                .get("freeText")
+                .or_else(|| params.get("free_text"))
+                .or_else(|| params.get("answer"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            cancelled: params
+                .get("cancelled")
+                .or_else(|| params.get("canceled"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        };
+        // Same targeting rule as approvals.
+        let sid = params
+            .get("session_id")
+            .or_else(|| params.get("sessionId"))
+            .and_then(|value| value.as_str());
+        let senders = self.state.question_txs.lock().await;
+        match sid {
+            Some(sid) if !sid.is_empty() => {
+                if let Some(sender) = senders.get(sid) {
+                    let _ = sender.try_send(response);
+                } else {
+                    return Err(format!("session not found: {sid}"));
+                }
+            }
+            _ => {
+                for sender in senders.values() {
+                    let _ = sender.try_send(response.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_models(&self) -> serde_json::Value {
+        let models = self
+            .state
+            .config()
+            .models
+            .iter()
+            .map(|(alias, model)| {
+                serde_json::json!({
+                    "id": alias,
+                    "model": model.model,
+                    "provider": model.provider,
+                    "capabilities": model.capabilities,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"models": models})
+    }
+
+    async fn list_mcp(&self) -> serde_json::Value {
+        let servers = self.state.mcp.list_server_status().await;
+        let tool_count = self.state.mcp.list_tools().await.len();
+        serde_json::json!({
+            "servers": servers.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "enabled": s.enabled,
+                "connected": s.connected,
+                "transport": s.transport,
+            })).collect::<Vec<_>>(),
+            "toolCount": tool_count,
+        })
+    }
+
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<serde_json::Value>> {
+        Some(self.state.events.subscribe())
+    }
+}
+
+impl AgentHttpBackend {
+    async fn attach_session_live_fields(
+        &self,
+        session_id: &str,
+        mut body: serde_json::Value,
+    ) -> serde_json::Value {
+        // A running turn temporarily owns the Session, so `body` may come from
+        // the checkout-time in_flight_views snapshot. Configuration controls
+        // remain live through shared handles; overlay their current values so
+        // switching away and back never resurrects the pre-turn model/mode.
+        let model_alias = self
+            .state
+            .model_aliases
+            .lock()
+            .await
+            .get(session_id)
+            .cloned();
+        let current_model = model_alias.map(|alias| {
+            alias
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        });
+        let permission_mode = self
+            .state
+            .permission_modes
+            .lock()
+            .await
+            .get(session_id)
+            .cloned();
+        let current_permission_mode = permission_mode.map(|mode| {
+            mode.lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .to_string()
+        });
+        let plan_mode = self
+            .state
+            .plan_mode_requests
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .map(|requested| requested.load(std::sync::atomic::Ordering::SeqCst));
+        let extra = self.state.resume_reconnect_fields(session_id).await;
+        let approval = self
+            .state
+            .pending_tool_approval_for_session(session_id)
+            .await;
+        let question = self.state.pending_question_for_session(session_id).await;
+        let status = self
+            .state
+            .resume_status_for_session(
+                session_id,
+                self.state.turn_locks.is_busy(session_id).await,
+                approval.is_some(),
+                question.is_some(),
+            )
+            .await;
+        if let Some(object) = body.as_object_mut() {
+            if let Some(model) = current_model {
+                object.insert("model".into(), serde_json::json!(model));
+            }
+            if let Some(mode) = current_permission_mode {
+                object.insert("permission_mode".into(), serde_json::json!(mode));
+            }
+            if let Some(enabled) = plan_mode {
+                object.insert("plan_mode".into(), serde_json::json!(enabled));
+            }
+            for (key, value) in extra {
+                object.insert(key, value);
+            }
+            object.insert(
+                "status".into(),
+                serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!("idle")),
+            );
+            if let Some(approval) = approval {
+                if let Ok(value) = serde_json::to_value(approval) {
+                    object.insert("pending_approval".into(), value);
+                }
+            }
+            if let Some(question) = question {
+                object.insert("pending_question".into(), question);
+            }
+        }
+        body
+    }
+}
+
+#[async_trait::async_trait]
+impl kkagent_rpc::HttpBackend for AgentHttpBackend {
+    fn event_sender(&self) -> Option<tokio::sync::broadcast::Sender<serde_json::Value>> {
+        Some(self.state.events.clone())
+    }
+
+    async fn list_sessions(&self) -> serde_json::Value {
+        if let Ok(summaries) = self.state.disk_session_summaries(false, 200).await {
+            if !summaries.is_empty() {
+                let db = self.state.transcript.lock().await;
+                let session_ids: Vec<String> =
+                    summaries.iter().map(|summary| summary.id.clone()).collect();
+                let records = db.sessions_by_ids(&session_ids).unwrap_or_default();
+                let list: Vec<_> = summaries
+                    .into_iter()
+                    .map(|summary| {
+                        let record = records.get(&summary.id);
+                        http_session_list_item(summary, record)
+                    })
+                    .collect();
+                return serde_json::json!({"sessions": list});
+            }
+        }
+        let list: Vec<_> = {
+            let sessions = self.state.sessions.lock().await;
+            sessions
+                .values()
+                .map(|s| {
+                    let meta = s.services.metadata.read();
+                    let preview = meta
+                        .last_prompt
+                        .clone()
+                        .or_else(|| meta.first_prompt.clone())
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "session_id": s.id,
+                        "title": s.title,
+                        "workspace": s.working_dir.display().to_string(),
+                        "working_dir": s.working_dir.display().to_string(),
+                        "preview": preview,
+                        "forked_from": meta.forked_from.clone(),
+                        "parent_id": meta.forked_from,
+                        "messages": s.messages.len(),
+                        "permission_mode": s.get_permission_mode().to_string(),
+                    })
+                })
+                .collect()
+        };
+        let db = self.state.transcript.lock().await;
+        let archived = db.list_sessions(50).unwrap_or_default();
+        let archived_json: Vec<_> = archived
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "session_id": r.session_id,
+                    "title": r.title,
+                    "workspace": r.working_dir,
+                    "working_dir": r.working_dir,
+                    "updated_at": r.updated_at,
+                })
+            })
+            .collect();
+        serde_json::json!({"sessions": list, "transcript": archived_json})
+    }
+
+    async fn create_session(
+        &self,
+        workspace: Option<String>,
+        title: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let requested = workspace
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| "workspace is required".to_string())?;
+        let cwd = std::fs::canonicalize(&requested)
+            .map_err(|error| format!("invalid workspace {}: {error}", requested.display()))?;
+        if !self.state.workspace_is_trusted(&cwd) {
+            return Err(format!(
+                "workspace {} is outside trusted_workspaces",
+                cwd.display()
+            ));
+        }
+        let model = self
+            .state
+            .config()
+            .default_model_alias()
+            .ok_or_else(|| "default_model is not configured".to_string())?
+            .to_string();
+        let mut session = Session::new(
+            id.clone(),
+            cwd.clone(),
+            permission_mode_from_config(&self.state.config()),
+            model.clone(),
+        );
+        initialize_session_context(&self.state, &mut session).await;
+        if let Some(ref t) = title {
+            session
+                .set_title_persisted(t.clone())
+                .map_err(|error| error.to_string())?;
+        }
+        {
+            let db = self.state.transcript.lock().await;
+            db.create_session(&id, &model, &cwd.to_string_lossy())
+                .map_err(|error| error.to_string())?;
+            if let Some(ref t) = title {
+                db.set_title(&id, t).map_err(|error| error.to_string())?;
+            }
+        }
+        session.services.on_created().await;
+        fire_session_hook(
+            &self.state,
+            kkagent_mcp::HookEvent::SessionStart,
+            &session.id,
+            &session.working_dir,
+        )
+        .await;
+        self.state
+            .interrupt_flags
+            .lock()
+            .await
+            .insert(id.clone(), session.interrupted.clone());
+        self.state
+            .model_aliases
+            .lock()
+            .await
+            .insert(id.clone(), session.model_alias.clone());
+        self.state
+            .fallback_models
+            .lock()
+            .await
+            .insert(id.clone(), session.fallback_model.clone());
+        self.state
+            .permission_modes
+            .lock()
+            .await
+            .insert(id.clone(), session.permission_mode.clone());
+        self.state
+            .plan_mode_requests
+            .lock()
+            .await
+            .insert(id.clone(), session.plan_mode_requested.clone());
+        self.state
+            .approval_txs
+            .lock()
+            .await
+            .insert(id.clone(), session.approval_tx.clone());
+        self.state
+            .question_txs
+            .lock()
+            .await
+            .insert(id.clone(), session.question_tx.clone());
+        self.state
+            .steer_mailboxes
+            .lock()
+            .await
+            .insert(id.clone(), session.steer_mailbox.clone());
+        let session_dir = session.session_dir().display().to_string();
+        let permission_mode = session.get_permission_mode().to_string();
+        let plan_mode = session.plan_mode;
+        let model_alias = session.get_model_alias();
+        self.state.sessions.lock().await.insert(id.clone(), session);
+        Ok(serde_json::json!({
+            "session_id": id,
+            "workspace": cwd.display().to_string(),
+            "title": title,
+            "session_dir": session_dir,
+            "permission_mode": permission_mode,
+            "plan_mode": plan_mode,
+            "model": model_alias,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        }))
+    }
+
+    async fn get_session(&self, id: &str) -> Option<serde_json::Value> {
+        let turn_active = self.state.turn_locks.is_busy(id).await;
+        let body = {
+            let sessions = self.state.sessions.lock().await;
+            sessions.get(id).map(http_session_json)
+        };
+        let body = match body {
+            Some(body) => Some(body),
+            None => {
+                let views = self.state.in_flight_views.lock().await;
+                views.get(id).cloned()
+            }
+        };
+        if let Some(mut body) = body {
+            if turn_active {
+                if let Some(messages) = body.get("messages").cloned() {
+                    let base =
+                        serde_json::from_value::<Vec<ChatMessage>>(messages).unwrap_or_default();
+                    let merged = self.state.resume_messages_for_active_turn(id, base).await;
+                    if let Some(object) = body.as_object_mut() {
+                        object.insert(
+                            "messages".into(),
+                            serde_json::to_value(merged).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            return Some(self.attach_session_live_fields(id, body).await);
+        }
+        let (record, messages) = {
+            let db = self.state.transcript.lock().await;
+            let record = db.get_session(id).ok()??;
+            let records = db.load_messages(id).ok()?;
+            (record, http_messages_from_records(&records))
+        };
+        let forked_from = SessionStore::open_default()
+            .get(id)
+            .ok()
+            .and_then(|summary| summary.forked_from);
+        let permission_mode = {
+            let modes = self.state.permission_modes.lock().await;
+            modes
+                .get(id)
+                .map(|mode| {
+                    mode.lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .to_string()
+                })
+                .unwrap_or_else(|| self.state.config().effective_permission_mode().to_string())
+        };
+        Some(
+            self.attach_session_live_fields(
+                id,
+                serde_json::json!({
+                    "session_id": record.session_id,
+                    "title": record.title,
+                    "workspace": record.working_dir,
+                    "working_dir": record.working_dir,
+                    "updated_at": record.updated_at,
+                    "forked_from": forked_from.clone(),
+                    "parent_id": forked_from,
+                    "permission_mode": permission_mode,
+                    "plan_mode": false,
+                    "model": record.model,
+                    "messages": messages,
+                }),
+            )
+            .await,
+        )
+    }
+
+    async fn delete_session(&self, id: &str) -> Result<(), String> {
+        let _turn_permit = self.state.turn_locks.try_acquire(id).await?;
+        let session = self.state.sessions.lock().await.remove(id);
+        if session.is_none() {
+            let exists = self
+                .state
+                .transcript
+                .lock()
+                .await
+                .get_session(id)
+                .map_err(|e| e.to_string())?
+                .is_some();
+            if !exists {
+                return Err("session not found".into());
+            }
+        }
+        self.state.interrupt_flags.lock().await.remove(id);
+        self.state.model_aliases.lock().await.remove(id);
+        self.state.fallback_models.lock().await.remove(id);
+        self.state.permission_modes.lock().await.remove(id);
+        self.state.plan_mode_requests.lock().await.remove(id);
+        self.state.approval_txs.lock().await.remove(id);
+        self.state.question_txs.lock().await.remove(id);
+        self.state.steer_mailboxes.lock().await.remove(id);
+        self.state.active_btw_sessions.lock().await.remove(id);
+        self.state.reconnect_ui.lock().await.remove(id);
+        self.state.turn_locks.remove(id).await;
+        // Remove the on-disk session directory as well — list_sessions()
+        // primarily serves disk summaries, so skipping this would keep the
+        // deleted session visible in the session list.
+        match tokio::task::spawn_blocking({
+            let id = id.to_string();
+            move || SessionStore::open_default().delete(&id)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            // Transcript-only sessions legitimately have no journal directory.
+            Ok(Err(error)) if error.to_string().contains("session not found") => {}
+            Ok(Err(error)) => {
+                return Err(format!("session {id}: disk delete failed ({error:#})"));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "session {id}: disk delete worker failed ({error:?})"
+                ));
+            }
+        }
+        {
+            let db = self.state.transcript.lock().await;
+            // Archive the full session (messages + oversized tool results) to
+            // `<config_dir>/trash/<id>.jsonl`, then purge DB rows. File
+            // cleanup happens inside the archive call; leftovers are logged
+            // but never fail the delete.
+            if let Err(error) = kkagent_core::trash::archive_session_to_trash(
+                &db,
+                &kkagent_config::default_config_dir(),
+                id,
+            ) {
+                if session.is_none() && error.to_string().contains("session not found") {
+                    return Err("session not found".into());
+                }
+                tracing::warn!("session {id}: trash archival failed ({error}); keeping DB rows");
+            }
+        }
+        if let Some(session) = session.as_ref() {
+            fire_session_hook(
+                &self.state,
+                kkagent_mcp::HookEvent::SessionEnd,
+                &session.id,
+                &session.working_dir,
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    async fn post_message(
+        &self,
+        id: &str,
+        text: &str,
+        images: &[kkagent_rpc::HttpImageInput],
+        task_id: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        // Queue user message and run AgentLoop turn on shared ServerState.
+        if text.trim().is_empty() && images.is_empty() {
+            return Err("message text must not be empty".into());
+        }
+        ensure_session_loaded(&self.state, id).await?;
+        if let Some(task_id) = task_id {
+            self.state
+                .durable_http
+                .claim_turn(task_id)
+                .map_err(|error| error.to_string())?;
+        }
+        // While a turn is running, deliver the input as a steer (mirrors the
+        // native `session.steer` path and the WebUI's expectation that sending
+        // mid-turn steers the agent). Previously this failed with
+        // "busy with another turn", which the HTTP layer surfaced as a
+        // misleading 404 and the message was lost.
+        if self.state.turn_locks.is_busy(id).await {
+            let steer_images = images
+                .iter()
+                .map(|image| (image.media_type.clone(), image.data.clone()))
+                .collect();
+            let mailbox = {
+                let mailboxes = self.state.steer_mailboxes.lock().await;
+                mailboxes
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("session not found: {id}"))?
+            };
+            if push_steer_tolerating_turn_start(
+                &mailbox,
+                &self.state.turn_locks,
+                id,
+                SteerInput {
+                    text: text.to_string(),
+                    images: steer_images,
+                },
+                TURN_PERMIT_GRACE,
+            )
+            .await
+            .is_ok()
+            {
+                // This request delivers input to an existing turn rather than
+                // starting its own turn. Complete its durable delivery receipt
+                // so retrying the idempotency key cannot inject it a second time.
+                if let Some(task_id) = task_id {
+                    self.state
+                        .durable_http
+                        .finish_turn(task_id, "completed", None)
+                        .map_err(|error| error.to_string())?;
+                }
+                self.state.publish_rpc_event(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::SteerInput {
+                        session_id: id.to_string(),
+                        text: text.to_string(),
+                        idempotency_key: None,
+                    })
+                    .unwrap_or_default(),
+                });
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "steered": true,
+                    "session_id": id,
+                }));
+            }
+            // Idle again (the turn finished while we raced admission):
+            // fall through and start a fresh turn below.
+        }
+        // An interrupt completes asynchronously. Match the native RPC prompt
+        // path and briefly wait for the cancelled turn to release ownership,
+        // instead of rejecting a prompt submitted immediately after Stop.
+        let turn_permit = self
+            .state
+            .turn_locks
+            .try_acquire_with_grace(id, TURN_PERMIT_GRACE)
+            .await?;
+        let mut sessions = self.state.sessions.lock().await;
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| "session not found".to_string())?;
+        let n = prepare_http_user_message(session, text, images)?;
+        drop(sessions);
+        let state = self.state.clone();
+        let sid = id.to_string();
+        let durable_task_id = task_id.map(str::to_string);
+        tokio::spawn(async move {
+            let _turn_permit = turn_permit;
+            let result = run_http_turn(state.clone(), &sid, durable_task_id.clone()).await;
+            if let Some(task_id) = durable_task_id {
+                match &result {
+                    Ok(()) => {
+                        if let Err(error) =
+                            state.durable_http.finish_turn(&task_id, "completed", None)
+                        {
+                            tracing::error!("Failed to complete durable task {task_id}: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        let _ = state.durable_http.finish_turn(
+                            &task_id,
+                            "failed",
+                            Some(&error.to_string()),
+                        );
+                    }
+                }
+            }
+            if let Err(e) = result {
+                tracing::warn!("HTTP-triggered turn failed: {e}");
+            }
+        });
+        Ok(serde_json::json!({"ok": true, "queued": true, "message_count": n}))
+    }
+
+    async fn fork_session(
+        &self,
+        id: &str,
+        title: Option<String>,
+        message_limit: Option<usize>,
+    ) -> Result<serde_json::Value, String> {
+        let mut params = serde_json::json!({"session_id": id});
+        if let Some(title) = title {
+            params["title"] = serde_json::json!(title);
+        }
+        if let Some(limit) = message_limit {
+            params["message_limit"] = serde_json::json!(limit);
+        }
+        http_rpc(&self.state, "sessions.fork", params).await
+    }
+
+    async fn start_btw(&self, id: &str, question: &str) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.btw",
+            serde_json::json!({"session_id": id, "text": question}),
+        )
+        .await
+    }
+
+    async fn cancel_btw(&self, id: &str) -> Result<serde_json::Value, String> {
+        http_rpc(
+            &self.state,
+            "session.btw_cancel",
+            serde_json::json!({"session_id": id}),
+        )
+        .await
+    }
+
+    async fn rename_session(&self, id: &str, title: &str) -> Result<serde_json::Value, String> {
+        http_rpc(
+            &self.state,
+            "session.set_title",
+            serde_json::json!({"session_id": id, "title": title}),
+        )
+        .await
+    }
+
+    async fn interrupt_session(&self, id: &str) -> Result<serde_json::Value, String> {
+        http_rpc(
+            &self.state,
+            "session.interrupt",
+            serde_json::json!({"session_id": id}),
+        )
+        .await
+    }
+
+    async fn set_permission_mode(&self, id: &str, mode: &str) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.set_permission_mode",
+            serde_json::json!({"session_id": id, "mode": mode}),
+        )
+        .await
+    }
+
+    async fn set_plan_mode(&self, id: &str, enabled: bool) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.set_plan_mode",
+            serde_json::json!({"session_id": id, "enabled": enabled}),
+        )
+        .await
+    }
+
+    async fn set_model(&self, id: &str, model: &str) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.set_model",
+            serde_json::json!({"session_id": id, "model": model}),
+        )
+        .await
+    }
+
+    async fn compact_session(
+        &self,
+        id: &str,
+        instruction: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        let mut params = serde_json::json!({"session_id": id});
+        if let Some(instruction) = instruction.filter(|value| !value.trim().is_empty()) {
+            params["instruction"] = serde_json::json!(instruction);
+        }
+        http_rpc(&self.state, "session.compact", params).await
+    }
+
+    async fn undo_session(&self, id: &str, count: usize) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.undo",
+            serde_json::json!({"session_id": id, "count": count}),
+        )
+        .await
+    }
+
+    async fn restore_session(
+        &self,
+        id: &str,
+        turn_index: usize,
+    ) -> Result<serde_json::Value, String> {
+        ensure_session_loaded(&self.state, id).await?;
+        http_rpc(
+            &self.state,
+            "session.restore",
+            serde_json::json!({"session_id": id, "turn_index": turn_index}),
+        )
+        .await
+    }
+
+    async fn archive_session(&self, id: &str, archived: bool) -> Result<serde_json::Value, String> {
+        http_rpc(
+            &self.state,
+            "sessions.archive",
+            serde_json::json!({"session_id": id, "archived": archived}),
+        )
+        .await
+    }
+
+    async fn list_tools(&self) -> serde_json::Value {
+        let mut reg = ToolRegistry::new();
+        kkagent_tools::register_builtin_tools(&mut reg);
+        kkagent_fangida::register_tools(&mut reg);
+        let names: Vec<_> = reg
+            .tool_definitions()
+            .iter()
+            .map(|t| serde_json::json!({"name": t.name, "description": t.description}))
+            .collect();
+        serde_json::json!({"tools": names})
+    }
+
+    async fn list_tasks(&self) -> serde_json::Value {
+        let all = self.state.subagents.list_all().await;
+        let tasks: Vec<_> = all
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "task_id": t.agent_id,
+                    "description": t.description,
+                    "status": t.status,
+                })
+            })
+            .collect();
+        let turns = self
+            .state
+            .durable_http
+            .list_turns(200)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|turn| {
+                serde_json::json!({
+                    "task_id": turn.task_id,
+                    "session_id": turn.session_id,
+                    "description": "agent turn",
+                    "status": turn.state,
+                    "attempts": turn.attempts,
+                    "updated_at": turn.updated_at,
+                    "error": turn.error,
+                    "kind": "turn",
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"tasks": tasks, "turns": turns})
+    }
+
+    async fn list_skills(&self) -> serde_json::Value {
+        let list = self.state.skills.list().await;
+        let mut items = Vec::new();
+        for e in list {
+            let enabled = self.state.skills.is_enabled(&e.name).await;
+            items.push(serde_json::json!({
+                "name": e.name,
+                "description": e.description,
+                "enabled": enabled,
+            }));
+        }
+        serde_json::json!({"skills": items})
+    }
+
+    async fn list_models(&self) -> serde_json::Value {
+        let mut models: Vec<_> = self
+            .state
+            .config()
+            .models
+            .iter()
+            .map(|(alias, m)| {
+                serde_json::json!({
+                    "alias": alias,
+                    "model": m.model,
+                    "provider": m.provider,
+                    "max_context_size": m.max_context_size,
+                })
+            })
+            .collect();
+        for e in kkagent_llm::builtin_catalog() {
+            models.push(serde_json::json!({
+                "id": e.id,
+                "provider": e.provider,
+                "context_window": e.context_window,
+                "responses_api": e.responses_api,
+            }));
+        }
+        serde_json::json!({"models": models})
+    }
+
+    async fn get_config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "default_model": self.state.config().default_model,
+            "default_permission_mode": self.state.config().effective_permission_mode(),
+            "config_dir": kkagent_config::default_config_dir().display().to_string(),
+            "mcp_servers": self.state.config().mcp_servers.len(),
+            "sandbox": self.state.sandbox_snapshot().mode_name(),
+        })
+    }
+
+    async fn approve(
+        &self,
+        id: &str,
+        decision: &str,
+        feedback: Option<String>,
+        selected_label: Option<String>,
+        scope: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        let dec = match decision {
+            "approved" | "approve" | "allow" => kkagent_protocol::ApprovalDecision::Approved,
+            "rejected" | "reject" | "deny" => kkagent_protocol::ApprovalDecision::Rejected,
+            _ => kkagent_protocol::ApprovalDecision::Cancelled,
+        };
+        let scope = match scope.as_deref().map(str::trim) {
+            Some("session") => Some(kkagent_protocol::ApprovalScope::Session),
+            Some("always") => Some(kkagent_protocol::ApprovalScope::Always),
+            Some("turn") => Some(kkagent_protocol::ApprovalScope::Turn),
+            _ => None,
+        };
+        let resp = kkagent_protocol::ApprovalResponse {
+            approval_id: id.to_string(),
+            decision: dec,
+            scope,
+            feedback,
+            selected_label,
+        };
+        let txs = self.state.approval_txs.lock().await;
+        for tx in txs.values() {
+            let _ = tx.try_send(resp.clone());
+        }
+        Ok(serde_json::json!({"ok": true, "approval_id": id}))
+    }
+
+    async fn plugin_rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        const ALLOWED: &[&str] = &[
+            "plugins.list",
+            "plugins.install",
+            "plugins.update",
+            "plugins.enable",
+            "plugins.disable",
+            "plugins.remove",
+            "plugins.marketplaces.list",
+            "plugins.marketplaces.add",
+            "plugins.marketplaces.remove",
+            "plugins.marketplace",
+        ];
+        if !ALLOWED.contains(&method) {
+            return Err(format!("unsupported plugin method: {method}"));
+        }
+        http_rpc(&self.state, method, params).await
+    }
+
+    async fn cancel_turn(&self, task_id: &str) -> Result<serde_json::Value, String> {
+        let turn = self
+            .state
+            .durable_http
+            .get_turn(task_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "task not found".to_string())?;
+        let cancelled = self
+            .state
+            .durable_http
+            .cancel_turn(task_id)
+            .map_err(|error| error.to_string())?;
+        if let Some(flag) = self
+            .state
+            .interrupt_flags
+            .lock()
+            .await
+            .get(&turn.session_id)
+            .cloned()
+        {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(handle) = self
+            .state
+            .abort_registry
+            .lock()
+            .await
+            .remove(&turn.session_id)
+        {
+            handle.abort();
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "task_id": cancelled.task_id,
+            "session_id": cancelled.session_id,
+            "state": cancelled.state,
+        }))
+    }
+
+    async fn fs_read(&self, path: &str) -> Result<String, String> {
+        let path = resolve_http_fs_path(self.state.config().as_ref(), path, false)?;
+        tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn fs_write(&self, path: &str, content: &str) -> Result<(), String> {
+        let path = resolve_http_fs_path(self.state.config().as_ref(), path, true)?;
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(&path, content)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_files(&self, path: &str) -> Result<serde_json::Value, String> {
+        let path = resolve_http_fs_path(self.state.config().as_ref(), path, false)?;
+        let mut directory = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut entries = Vec::new();
+        while entries.len() < 200 {
+            let Some(entry) = directory
+                .next_entry()
+                .await
+                .map_err(|error| error.to_string())?
+            else {
+                break;
+            };
+            let file_type = entry.file_type().await.map_err(|error| error.to_string())?;
+            entries.push(serde_json::json!({
+                "name": entry.file_name().to_string_lossy(),
+                "path": entry.path().display().to_string(),
+                "is_dir": file_type.is_dir(),
+            }));
+        }
+        Ok(serde_json::json!({"entries": entries}))
+    }
+
+    async fn search(&self, query: &str) -> serde_json::Value {
+        let db = self.state.transcript.lock().await;
+        match db.search_messages(query, 100, None, None, None, None) {
+            Ok(hits) => serde_json::json!({
+                "query": query,
+                "hits": hits,
+                "source": "fts",
+            }),
+            Err(error) => {
+                tracing::warn!("FTS search failed, falling back to memory: {error}");
+                drop(db);
+                let needle = query.to_lowercase();
+                let sessions = self.state.sessions.lock().await;
+                let mut hits = Vec::new();
+                for session in sessions.values() {
+                    for (index, message) in session.messages.iter().enumerate() {
+                        for part in &message.content {
+                            let text = match part {
+                                ChatContent::Text { text }
+                                | ChatContent::Thinking { thinking: text } => text,
+                                ChatContent::ToolResult { content, .. } => content,
+                                ChatContent::ToolUse { .. }
+                                | ChatContent::Image { .. }
+                                | ChatContent::Video { .. } => continue,
+                            };
+                            if text.to_lowercase().contains(&needle) {
+                                hits.push(serde_json::json!({
+                                    "session_id": session.id,
+                                    "message_index": index,
+                                    "role": message.role,
+                                    "preview": text.chars().take(240).collect::<String>(),
+                                }));
+                                if hits.len() == 100 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                serde_json::json!({"query": query, "hits": hits, "source": "memory"})
+            }
+        }
+    }
+
+    async fn workspace_info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()),
+            "sessions": self.state.sessions.lock().await.len(),
+        })
+    }
+
+    async fn list_questions(&self) -> serde_json::Value {
+        let questions = self.state.pending_questions.lock().await;
+        serde_json::json!({"questions": questions.values().cloned().collect::<Vec<_>>()})
+    }
+
+    async fn answer_question(
+        &self,
+        id: &str,
+        response: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let pending = self
+            .state
+            .pending_questions
+            .lock()
+            .await
+            .remove(id)
+            .ok_or_else(|| "question not found".to_string())?;
+        let session_id = pending
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "pending question has no session".to_string())?;
+        let question_response = kkagent_protocol::QuestionResponse {
+            question_id: id.to_string(),
+            selected_option_ids: response
+                .get("selected_option_ids")
+                .or_else(|| response.get("selectedOptionIds"))
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            free_text: response
+                .get("free_text")
+                .or_else(|| response.get("freeText"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            cancelled: response
+                .get("cancelled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        };
+        let senders = self.state.question_txs.lock().await;
+        let sender = senders
+            .get(session_id)
+            .ok_or_else(|| "session question channel not found".to_string())?;
+        sender
+            .try_send(question_response)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"ok": true, "question_id": id}))
+    }
+
+    async fn health(&self) -> serde_json::Value {
+        let persistence_responding = self.state.transcript.lock().await.list_sessions(1).is_ok();
+        let task_persistence_responding = self.state.durable_http.list_turns(1).is_ok();
+        let sandbox = self.state.sandbox_snapshot();
+        serde_json::json!({
+            "status": "ok",
+            "uptime_seconds": self.state.started_at.elapsed().as_secs(),
+            "persistence": {
+                "durable": self.state.persistence_durable,
+                "responding": persistence_responding,
+                "tasks_responding": task_persistence_responding,
+                "error": self.state.persistence_error,
+            },
+            "sessions": self.state.sessions.lock().await.len(),
+            "mcp_servers": self.state.config().mcp_servers.len(),
+            "sandbox": {
+                "mode": sandbox.mode_name(),
+                "network": sandbox.network,
+            },
+        })
+    }
+
+    async fn readiness(&self) -> Result<serde_json::Value, String> {
+        if !self.state.persistence_durable {
+            return Err(self
+                .state
+                .persistence_error
+                .clone()
+                .unwrap_or_else(|| "transcript persistence is not durable".into()));
+        }
+        self.state
+            .transcript
+            .lock()
+            .await
+            .list_sessions(1)
+            .map_err(|error| format!("transcript persistence unavailable: {error}"))?;
+        self.state
+            .durable_http
+            .list_turns(1)
+            .map_err(|error| format!("task persistence unavailable: {error}"))?;
+        Ok(serde_json::json!({
+            "status": "ready",
+            "persistence": "durable",
+        }))
+    }
+}
+
+fn prepare_http_user_message(
+    session: &mut Session,
+    text: &str,
+    images: &[kkagent_rpc::HttpImageInput],
+) -> Result<usize, String> {
+    // `session.interrupt` sets a cooperative flag shared with the in-flight
+    // turn. That flag belongs to the old turn and must never poison the next
+    // one (notably after changing models in the WebUI).
+    session.clear_interrupt();
+    session
+        .add_user_message_with_images(
+            text.to_string(),
+            images
+                .iter()
+                .map(|image| (image.media_type.clone(), image.data.clone()))
+                .collect(),
+        )
+        .map_err(|error| format!("invalid image input: {error}"))?;
+    Ok(session.messages.len())
+}
+
+fn trusted_http_roots(config: &AppConfig) -> Result<Vec<PathBuf>, String> {
+    let configured = if config.trusted_workspaces.is_empty() {
+        vec![std::env::current_dir().map_err(|e| e.to_string())?]
+    } else {
+        config
+            .trusted_workspaces
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+    };
+    configured
+        .into_iter()
+        .map(|root| {
+            std::fs::canonicalize(&root)
+                .map_err(|e| format!("invalid trusted workspace {}: {e}", root.display()))
+        })
+        .collect()
+}
+
+fn resolve_http_fs_path(config: &AppConfig, raw: &str, for_write: bool) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("path must not be empty".into());
+    }
+    let roots = trusted_http_roots(config)?;
+    let candidate = {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(path)
+        }
+    };
+
+    let resolved = if for_write {
+        kkagent_tools::path_policy::resolve_access_path(&candidate)
+    } else {
+        std::fs::canonicalize(&candidate)
+    }
+    .map_err(|e| format!("cannot resolve {}: {e}", candidate.display()))?;
+
+    if roots.iter().any(|root| resolved.starts_with(root)) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "path {} is outside trusted workspaces",
+            candidate.display()
+        ))
+    }
+}
+
+async fn build_turn_tool_registry(
+    state: &Arc<ServerState>,
+    event_tx: mpsc::Sender<AgentEvent>,
+    todos: Vec<kkagent_protocol::TodoItemEvent>,
+    session_id: &str,
+) -> ToolRegistry {
+    // MCP discovery starts in the background so the TUI can paint immediately.
+    // Synchronize only when a turn actually needs its final tool registry.
+    state.mcp.wait_until_initialized().await;
+    let mut tools = ToolRegistry::new();
+    kkagent_tools::register_builtin_tools(&mut tools);
+    kkagent_fangida::register_tools(&mut tools);
+    tools.register(Arc::new(kkagent_tools::builtin::TodoListTool::with_items(
+        todos,
+    )));
+    let background_config = state.config().background.clone();
+    let auto_background_on_timeout = background_config
+        .as_ref()
+        .and_then(|background| background.bash_auto_background_on_timeout)
+        .unwrap_or(true);
+    let default_timeout_s = background_config
+        .as_ref()
+        .and_then(|background| background.bash_task_timeout_s)
+        // `0` is not a meaningful timeout (would kill instantly); treat as unset.
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(kkagent_tools::builtin::bash::DEFAULT_TIMEOUT_S);
+    tools.register(Arc::new(kkagent_tools::builtin::BashTool::new(
+        state.bash_shells.clone(),
+        kkagent_tools::builtin::BashOptions {
+            auto_background_on_timeout,
+            sandbox: state.sandbox_snapshot(),
+            default_timeout_s,
+            toolchain: state.config().toolchain.clone(),
+            kaos: {
+                let cfg = state.config();
+                let remote = kkagent_kaos::RemoteConfig {
+                    enabled: cfg.remote.enabled,
+                    host: cfg.remote.host.clone(),
+                    port: cfg.remote.port,
+                    user: cfg.remote.user.clone(),
+                    identity_file: cfg.remote.identity_file.clone(),
+                    remote_cwd: cfg.remote.remote_cwd.clone(),
+                };
+                kkagent_kaos::environment_from_remote(
+                    Some(&remote),
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                )
+            },
+        },
+    )));
+    register_mcp_tools(&mut tools, &state.mcp).await;
+
+    let subagents = state.subagents.clone();
+    let config = state.config();
+    let max_depth = config.subagent.effective_max_depth();
+    let launch_web = state.web.read().await.clone();
+    // Plugin-contributed external subagent types (e.g. Cursor CLI over ACP).
+    // Qualified names are `<plugin>.<name>`; the launch closure dispatches on
+    // them before falling through to the built-in in-process agent loop.
+    let external_subagents = state.plugins.external_subagents().await;
+    let external_profiles = &external_subagents.0;
+    for conflict in &external_subagents.1 {
+        tracing::warn!(
+            "external subagent type `{conflict}` declared by multiple plugins; first wins"
+        );
+    }
+    let external_map: std::collections::HashMap<String, kkagent_core::plugin::PluginSubagentSpec> =
+        external_profiles.iter().cloned().collect();
+    // Self-referential launch slot: internal plugin subagents with
+    // `allowDelegation: true` re-enter this same closure for nested spawns,
+    // so depth stamping and profile dispatch stay uniform at any nesting.
+    let launch_slot: Arc<std::sync::OnceLock<kkagent_tools::builtin::task::SubagentLaunchFn>> =
+        Arc::new(std::sync::OnceLock::new());
+    let launch_slot_for_closure = launch_slot.clone();
+    let launch: kkagent_tools::builtin::task::SubagentLaunchFn =
+        Arc::new(move |mut sub_config, interrupt| {
+            let manager = subagents.clone();
+            let app_config = config.clone();
+            let web = launch_web.clone();
+            let agent_id = sub_config.agent_id.clone();
+            // Nested-launch handle: the slot is filled right after this
+            // closure is constructed, before any agent can run.
+            let launch_self = launch_slot_for_closure.get().cloned().unwrap_or_else(|| {
+                Arc::new(|_cfg: kkagent_protocol::subagent::SubagentConfig, _interrupt| {})
+            });
+            // External dispatch: profiles like `kk-cursor.cursor` run through
+            // the plugin-declared transport instead of the internal loop.
+            if let Some(profile) = sub_config.profile.clone() {
+                if let Some(spec) = external_map.get(profile.as_str()) {
+                    let spec = spec.clone();
+                    let mirror = Some(SubagentMirrorContext {
+                        parent_session_id: sub_config.parent_session_id.clone().unwrap_or_default(),
+                        parent_tool_call_id: sub_config
+                            .parent_tool_call_id
+                            .clone()
+                            .unwrap_or_default(),
+                        parent_event_tx: event_tx.clone(),
+                    });
+                    let run_ctx = kkagent_core::external_subagent::ExternalRunContext {
+                        app_config: app_config.clone(),
+                        web: web.clone(),
+                        permission_mode: kkagent_protocol::PermissionMode::Auto,
+                        interrupt: Some(interrupt.clone()),
+                        launch: Some(launch_self),
+                    };
+                    let ext_agent_id = agent_id.clone();
+                    let ext_manager = manager.clone();
+                    let join = tokio::spawn(async move {
+                        tracing::info!(
+                            "Plugin subagent {ext_agent_id} starting via {} ({})",
+                            spec.transport,
+                            sub_config.description
+                        );
+                        match kkagent_core::external_subagent::run_external_subagent(
+                            &spec, sub_config, mirror, run_ctx,
+                        )
+                        .await
+                        {
+                            Ok(result) => ext_manager.complete(&ext_agent_id, result).await,
+                            Err(error) => ext_manager.fail(&ext_agent_id, error.to_string()).await,
+                        }
+                    });
+                    let abort = join.abort_handle();
+                    let abort_manager = manager;
+                    let abort_agent_id = agent_id;
+                    tokio::spawn(async move {
+                        abort_manager.set_abort_handle(&abort_agent_id, abort).await;
+                    });
+                    return;
+                }
+            }
+            // Depth budget, layer 2 (root launch stamp): root-launched
+            // subagents (depth 0 from the Agent tool) start at depth 1;
+            // reject loudly if that already exceeds the configured cap
+            // (e.g. max_depth = 0 pre-clamp). Nested re-entries (internal
+            // plugin subagents with allowDelegation) arrive pre-stamped by
+            // their delegating runtime and skip this layer.
+            if sub_config.depth == 0 {
+                if let Err(reason) = stamp_child_depth(&mut sub_config, 0, max_depth) {
+                    tracing::warn!("Rejected root subagent {agent_id}: {reason}");
+                    let manager = manager.clone();
+                    tokio::spawn(async move {
+                        manager.fail(&agent_id, reason).await;
+                    });
+                    return;
+                }
+            }
+            let abort_manager = manager.clone();
+            let abort_agent_id = agent_id.clone();
+            let mirror = match (
+                sub_config.parent_session_id.clone(),
+                sub_config.parent_tool_call_id.clone(),
+            ) {
+                (Some(parent_session_id), Some(parent_tool_call_id)) => {
+                    Some(SubagentMirrorContext {
+                        parent_session_id,
+                        parent_tool_call_id,
+                        parent_event_tx: event_tx.clone(),
+                    })
+                }
+                _ => None,
+            };
+            let join = tokio::spawn(async move {
+                tracing::info!("Subagent {} starting: {}", agent_id, sub_config.description);
+                match kkagent_core::run_subagent_mirrored(
+                    app_config,
+                    web,
+                    sub_config,
+                    PermissionMode::Auto,
+                    mirror,
+                    Some(interrupt),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        tracing::info!("Subagent {} complete ({} chars)", agent_id, result.len());
+                        manager.complete(&agent_id, result).await;
+                    }
+                    Err(error) => {
+                        tracing::error!("Subagent {} failed: {}", agent_id, error);
+                        manager.fail(&agent_id, error.to_string()).await;
+                    }
+                }
+            });
+            let abort = join.abort_handle();
+            tokio::spawn(async move {
+                abort_manager.set_abort_handle(&abort_agent_id, abort).await;
+            });
+        });
+    // Fill the self-reference slot now that the closure exists (before any
+    // subagent can run — registration happens synchronously below).
+    let _ = launch_slot.set(launch.clone());
+    kkagent_tools::register_subagent_tools(
+        &mut tools,
+        state.subagents.clone(),
+        launch,
+        None,
+        state.config().tools.clone(),
+        external_profiles
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.description.clone()))
+            .collect(),
+    );
+    tools.register(Arc::new(
+        kkagent_tools::builtin::TaskOutputTool::with_bash_shells(
+            state.subagents.clone(),
+            state.bash_shells.clone(),
+        ),
+    ));
+    let goal_mgr = state.goal_for(session_id).await;
+    tools.register(Arc::new(
+        kkagent_tools::builtin::GoalTool::new(goal_mgr)
+            .with_judge_enabled(state.config().goal.judge_enabled),
+    ));
+    tools.register(Arc::new(kkagent_tools::builtin::SkillTool::new(
+        state.skills.clone(),
+    )));
+    if let Some(web) = kkagent_tools::builtin::WebTool::try_new(state.web.read().await.clone()) {
+        tools.register(Arc::new(web));
+    } else {
+        tracing::debug!("Web tool not registered: client construction failed");
+    }
+    tools.register(Arc::new(kkagent_tools::builtin::CronTool::new(
+        state.cron.clone(),
+    )));
+
+    // Plugin overrides run LAST: built-ins and MCP-bridged tools are all
+    // registered above, so re-binding cannot be clobbered by later registers.
+    let overrides = state.plugins.tool_overrides().await;
+    if !overrides.is_empty() {
+        let policy = state.config().plugins.clone();
+        let skipped = kkagent_core::plugin_overrides::apply_plugin_tool_overrides(
+            &mut tools,
+            &overrides,
+            &state.plugins,
+            &policy,
+        )
+        .await;
+        for (builtin, reason) in skipped {
+            tracing::warn!(tool = %builtin, %reason, "plugin tool override skipped");
+        }
+    }
+    tools
+}
+
+async fn run_http_turn(
+    state: Arc<ServerState>,
+    session_id: &str,
+    durable_task_id: Option<String>,
+) -> anyhow::Result<()> {
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
+    let live_events = state.events.clone();
+    let event_state = state.clone();
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if matches!(&event, AgentEvent::Heartbeat { .. }) {
+                continue;
+            }
+            if matches!(event, AgentEvent::ApprovalRequested { .. }) {
+                if let Some(task_id) = durable_task_id.as_deref() {
+                    let _ = event_state
+                        .durable_http
+                        .finish_turn(task_id, "waiting_approval", None);
+                }
+            }
+            if let AgentEvent::QuestionAsked {
+                session_id,
+                question,
+            } = &event
+            {
+                event_state.pending_questions.lock().await.insert(
+                    question.question_id.clone(),
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "question": question,
+                    }),
+                );
+            }
+            event_state.note_agent_event_for_resume(&event).await;
+            if let Ok(value) = serde_json::to_value(&event) {
+                let _ = live_events.send(value);
+            }
+        }
+    });
+
+    let mut session = state
+        .checkout_session(session_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("session gone"))?;
+    session.begin_turn();
+
+    let tools = build_turn_tool_registry(
+        &state,
+        event_tx.clone(),
+        session.todo_items(),
+        session.id.as_str(),
+    )
+    .await;
+
+    let permission_rules = state
+        .config()
+        .permission
+        .as_ref()
+        .map(|p| p.rules.clone())
+        .unwrap_or_default();
+    let permission = Arc::new(Mutex::new(PermissionChain::with_shared_mode(
+        session.permission_mode.clone(),
+        permission_rules,
+    )));
+    let agent = AgentLoop::new(
+        state.config(),
+        Arc::new(tools),
+        permission,
+        event_tx,
+        state.abort_registry.clone(),
+    )
+    .with_hooks(state.hooks.clone())
+    .with_goal_manager(state.goal_for(session.id.as_str()).await)
+    .with_tool_result_store(state.tool_result_store.clone())
+    .with_transcript_db(state.transcript.lock().await.clone());
+
+    let result = agent.run_turn(&mut session).await;
+    let steer_result = session.close_and_apply_steers();
+    let persist_result = {
+        let db = state.transcript.lock().await;
+        persist_session_messages(&db, &mut session)
+    };
+    {
+        // Keep reinsertion and the final request sync under the same lock. This
+        // closes the gap where an RPC could otherwise update the shared flag
+        // after the last sync but before the Session becomes visible again.
+        session.sync_requested_plan_mode()?;
+        state.checkin_session(session_id, session).await;
+    }
+    result?;
+    steer_result?;
+    persist_result
+}
+
+struct ServerState {
+    /// Hot-reloadable app config. Use [`Self::config`] / [`Self::replace_config`].
+    shared_config: StdRwLock<Arc<AppConfig>>,
+    /// Absolute path used for `/reload` / `config.reload`.
+    config_path: PathBuf,
+    /// User home directory; session wire dirs (incl. goal snapshots) live under it.
+    home_dir: PathBuf,
+    sandbox_policy: StdRwLock<kkagent_tools::sandbox::SandboxPolicy>,
+    workspace_trust: StdRwLock<kkagent_config::WorkspaceTrustStore>,
+    sessions: Mutex<HashMap<String, Session>>,
+    session_load_lock: Mutex<()>,
+    /// Session approval senders — must not require holding `sessions` lock
+    /// (agent loop may be waiting on approval while holding the session).
+    approval_txs: Mutex<HashMap<String, mpsc::Sender<kkagent_protocol::ApprovalResponse>>>,
+    question_txs: Mutex<HashMap<String, mpsc::Sender<kkagent_protocol::QuestionResponse>>>,
+    /// Steer mailboxes remain reachable while Session is owned by the agent loop.
+    steer_mailboxes: Mutex<HashMap<String, SessionSteerMailbox>>,
+    /// BTW services remain reachable while Session is owned by the agent loop.
+    active_btw_sessions: Mutex<HashMap<String, ActiveBtwSession>>,
+    /// Interrupt flags remain reachable while the session is out of `sessions` during a turn.
+    interrupt_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Model alias handles — reachable mid-turn when session is removed from `sessions`.
+    model_aliases: Mutex<HashMap<String, Arc<std::sync::Mutex<String>>>>,
+    /// Session fallback policy handles — reachable while a turn owns the Session.
+    fallback_models: Mutex<HashMap<String, Arc<std::sync::Mutex<SessionFallbackModel>>>>,
+    /// Permission mode handles — reachable mid-turn so `/permission` → manual takes effect immediately.
+    permission_modes: Mutex<HashMap<String, Arc<std::sync::Mutex<PermissionMode>>>>,
+    /// Desired plan mode handles — reachable while the agent loop owns the Session.
+    plan_mode_requests: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    abort_registry: Arc<Mutex<HashMap<String, AbortHandle>>>,
+    transcript: Mutex<TranscriptDb>,
+    /// Oversized tool-result store shared by every agent loop; also records
+    /// DB rows so trash archival can map files back to sessions.
+    tool_result_store: Arc<kkagent_core::agent_loop::ToolResultStore>,
+    durable_http: kkagent_rpc::DurableHttpStore,
+    /// Lifecycle of the HTTP / Web UI server, shared by `--http` startup and
+    /// `runtime.http.start` so both paths stay equivalent.
+    http_runtime: HttpServerManager,
+    subagents: Arc<SubagentManager>,
+    /// Connected MCP servers; tools registered per turn from this manager.
+    mcp: Arc<McpManager>,
+    /// Shared background shell jobs for Bash tool.
+    bash_shells: Arc<kkagent_tools::builtin::BackgroundShellManager>,
+    cron: Arc<kkagent_tools::CronManager>,
+    /// Per-session goal state (isolated; each persisted under the session's wire dir).
+    goal_managers: Mutex<HashMap<String, Arc<kkagent_protocol::goal::GoalManager>>>,
+    /// In-memory completion-judge records per session (TUI fetches via events;
+    /// this archive exists for future RPC/history queries). Capped, oldest evicted.
+    goal_judge_records: Mutex<HashMap<String, Vec<kkagent_core::goal_judge::GoalJudgeRecord>>>,
+    /// Judge-discussion history per session, as (role, text) exchanges with
+    /// role "user" | "judge". In-memory; cleared with the goal (replace/cancel).
+    judge_chat_history: Mutex<HashMap<String, Vec<(String, String)>>>,
+    /// Serializes judge discussion/verdict turns per session (one persona).
+    judge_chat_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Latest per-session usage totals (from UsageUpdate events) so a
+    /// reattached TUI can rebuild `/usage` without replaying the stream.
+    /// Subagent completion usage is folded in here too.
+    session_usage: Mutex<HashMap<String, kkagent_protocol::ModelUsageEntry>>,
+    /// Pending cron-fire XML injections for the next turn.
+    cron_fires: Arc<Mutex<Vec<String>>>,
+    hooks: Arc<kkagent_mcp::HookManager>,
+    skills: Arc<kkagent_tools::SkillCatalog>,
+    /// Web service backends; rebuilt when plugin service overrides change
+    /// (`/plugins reload` etc.) so the next turn's `WebTool` picks them up.
+    web: tokio::sync::RwLock<Arc<kkagent_tools::WebServicesConfig>>,
+    plugins: Arc<kkagent_core::PluginManager>,
+    telemetry: kkagent_telemetry::TelemetryServiceHandle,
+    events: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// In-flight AskUserQuestion payloads (keyed by question_id) for HTTP + TUI resume.
+    pending_questions: Mutex<HashMap<String, serde_json::Value>>,
+    /// In-flight tool/plan approval requests while a turn owns the Session (keyed by session_id).
+    pending_tool_approvals: Mutex<HashMap<String, kkagent_protocol::ApprovalRequest>>,
+    /// Last status / partial stream buffers so reattach can catch up without replaying wire.
+    reconnect_ui: Mutex<HashMap<String, SessionReconnectUi>>,
+    /// Session JSON snapshot while a turn owns the Session (HTTP get_session).
+    in_flight_views: Mutex<HashMap<String, serde_json::Value>>,
+    /// Live `/btw` panel state (survives TUI detach).
+    pending_btw: Mutex<HashMap<String, PendingBtwUi>>,
+    /// TUI next-turn prompt queue (synced from client so reattach keeps it).
+    prompt_queues: Mutex<HashMap<String, PromptQueueSnapshot>>,
+    /// Parent-session subagent lifecycle summaries for reattach.
+    pending_subagents: Mutex<HashMap<String, Vec<PendingSubagentUi>>>,
+    background_tasks: Mutex<Vec<AbortHandle>>,
+    turn_locks: SessionTurnLocks,
+    /// Recent session.prompt idempotency keys → first-seen time.
+    prompt_idempotency: Mutex<HashMap<String, std::time::Instant>>,
+    persistence_durable: bool,
+    persistence_error: Option<String>,
+    started_at: std::time::Instant,
+    client_count: AtomicUsize,
+    shutdown_tx: watch::Sender<bool>,
+    /// Live TUI/RPC writers that should receive agent event frames.
+    /// Turns publish here so Ctrl+B detach + reattach keeps streaming.
+    rpc_event_subscribers: StdRwLock<HashMap<u64, mpsc::Sender<Frame>>>,
+    rpc_event_subscriber_seq: AtomicUsize,
+}
+
+#[derive(Clone)]
+struct ActiveBtwSession {
+    service: Arc<SessionBtwService>,
+    agents: Arc<AgentLifecycleService>,
+    history: Arc<StdRwLock<Vec<ChatMessage>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionReconnectUi {
+    status: Option<SessionStatus>,
+    thinking_text: String,
+    assistant_text: String,
+    llm_retry: Option<LlmRetryUi>,
+    /// In-flight transcript tail for checked-out sessions (not yet persisted).
+    partial_messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct LlmRetryUi {
+    retry_number: u32,
+    reason: String,
+    remaining_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingBtwUi {
+    agent_id: String,
+    question: String,
+    answer: String,
+    thinking: String,
+    streaming: bool,
+    turns: Vec<BtwTurn>,
+    retry_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PromptQueueSnapshot {
+    selected: usize,
+    items: Vec<PromptQueueItem>,
+}
+
+#[derive(Debug, Clone)]
+struct PromptQueueItem {
+    id: String,
+    text: String,
+    images: Vec<(String, String)>,
+    as_steer: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSubagentUi {
+    subagent_id: String,
+    subagent_name: String,
+    parent_tool_call_id: String,
+    description: String,
+    status: String,
+    detail: Option<String>,
+    recent_child_events: Vec<String>,
+    /// Model shown for this subagent — resolved alias for internal runs,
+    /// external agent name for ACP.
+    model: Option<String>,
+}
+
+impl ActiveBtwSession {
+    fn from_session(session: &Session) -> Self {
+        Self {
+            service: session.services.btw.clone(),
+            agents: session.services.agents.clone(),
+            history: Arc::new(StdRwLock::new(session.messages.clone())),
+        }
+    }
+}
+
+impl ServerState {
+    fn config(&self) -> Arc<AppConfig> {
+        self.shared_config
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn replace_config(&self, next: Arc<AppConfig>) {
+        *self
+            .shared_config
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = next;
+    }
+
+    fn sandbox_snapshot(&self) -> kkagent_tools::sandbox::SandboxPolicy {
+        self.sandbox_policy
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn workspace_is_trusted(&self, workspace: &Path) -> bool {
+        if self
+            .workspace_trust
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .matching(workspace)
+            .is_some()
+        {
+            return true;
+        }
+        kkagent_core::is_workspace_trusted(&self.config(), workspace)
+    }
+
+    async fn disk_session_summaries(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> anyhow::Result<Vec<kkagent_core::session::store::SessionSummary>> {
+        tokio::task::spawn_blocking(move || {
+            SessionStore::open_default().list(include_archived, limit)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("session list worker failed: {error}"))?
+    }
+
+    fn apply_workspace_trust(&self, trust: kkagent_config::WorkspaceTrust) -> anyhow::Result<()> {
+        let trust = canonicalize_workspace_trust(trust)?;
+        self.workspace_trust
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .upsert(trust.clone());
+        self.sandbox_policy
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .upsert_workspace_trust(trust)
+    }
+
+    async fn checkout_session(&self, session_id: &str) -> Option<Session> {
+        let mut sessions = self.sessions.lock().await;
+        let mut views = self.in_flight_views.lock().await;
+        let session = sessions.remove(session_id)?;
+        views.insert(session_id.to_string(), http_session_json(&session));
+        Some(session)
+    }
+
+    async fn checkin_session(&self, session_id: &str, session: Session) {
+        let mut sessions = self.sessions.lock().await;
+        let mut views = self.in_flight_views.lock().await;
+        views.remove(session_id);
+        sessions.insert(session_id.to_string(), session);
+        // The persisted history (including everything this turn produced) is
+        // back in `sessions`, so the reconnect transcript tail is now redundant.
+        // Clearing it here — after checkin — closes the window where TurnEnd
+        // used to wipe the tail while the runner was still persisting.
+        drop(views);
+        drop(sessions);
+        self.reconnect_ui.lock().await.remove(session_id);
+    }
+}
+
+fn canonicalize_workspace_trust(
+    mut trust: kkagent_config::WorkspaceTrust,
+) -> anyhow::Result<kkagent_config::WorkspaceTrust> {
+    fn canonical_existing(path: &str, kind: &str) -> anyhow::Result<String> {
+        let path = Path::new(path);
+        let canonical = std::fs::canonicalize(path)
+            .with_context(|| format!("cannot resolve trusted {kind} path {}", path.display()))?;
+        Ok(canonical.to_string_lossy().into_owned())
+    }
+
+    trust.workspace = canonical_existing(&trust.workspace, "workspace")?;
+    trust.git_metadata_paths = trust
+        .git_metadata_paths
+        .iter()
+        .map(|path| canonical_existing(path, "Git metadata"))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    trust.git_metadata_paths.sort();
+    trust.git_metadata_paths.dedup();
+    if trust.global_git_config_allowed == Some(true) {
+        trust.global_git_config_roots = trust
+            .global_git_config_roots
+            .iter()
+            .map(|path| canonical_existing(path, "global Git config root"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        trust.repo_config_path = trust
+            .repo_config_path
+            .as_deref()
+            .map(|path| canonical_existing(path, "repo user config"))
+            .transpose()?;
+        trust.global_git_config_paths = trust
+            .global_git_config_paths
+            .iter()
+            .map(|path| canonical_existing(path, "global Git config"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        trust.global_git_ignore_path = trust
+            .global_git_ignore_path
+            .as_deref()
+            .map(|path| canonical_existing(path, "global Git ignore"))
+            .transpose()?;
+        trust.global_git_attributes_path = trust
+            .global_git_attributes_path
+            .as_deref()
+            .map(|path| canonical_existing(path, "global Git attributes"))
+            .transpose()?;
+        for root in &trust.global_git_config_roots {
+            if !trust.global_git_config_paths.contains(root) {
+                anyhow::bail!("global Git config root is outside the approved config file set");
+            }
+        }
+        trust.global_git_config_paths.sort();
+        trust.global_git_config_paths.dedup();
+    } else {
+        trust.global_git_config_roots.clear();
+        trust.repo_config_path = None;
+        trust.global_git_config_paths.clear();
+        trust.global_git_ignore_path = None;
+        trust.global_git_attributes_path = None;
+        trust.global_git_risks.clear();
+    }
+    trust.validate()?;
+    Ok(trust)
+}
+
+/// How long `session.prompt` waits for a finishing turn to release its permit
+/// before reporting the session as busy. Turns publish idle events to clients
+/// before persistence completes, so queued prompts routinely arrive a few
+/// milliseconds early.
+const TURN_PERMIT_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct SessionTurnLocks {
+    entries: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+}
+
+impl SessionTurnLocks {
+    async fn try_acquire(
+        &self,
+        session_id: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        let semaphore = self
+            .entries
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone();
+        semaphore
+            .try_acquire_owned()
+            .map_err(|_| format!("session {session_id} is busy with another turn"))
+    }
+
+    /// Like [`SessionTurnLocks::try_acquire`], but tolerates a short teardown
+    /// window: a finished turn publishes idle events to clients before it
+    /// finishes persisting state and releasing its permit, so a queued prompt
+    /// that arrives right after "idle" can still observe the session as busy.
+    /// Wait up to `grace` for the permit to free up instead of failing fast.
+    async fn try_acquire_with_grace(
+        &self,
+        session_id: &str,
+        grace: Duration,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        if let Ok(permit) = self.try_acquire(session_id).await {
+            return Ok(permit);
+        }
+        let busy = format!("session {session_id} is busy with another turn");
+        let semaphore = {
+            let mut entries = self.entries.lock().await;
+            entries
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(1)))
+                .clone()
+        };
+        match tokio::time::timeout(grace, semaphore.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => Err(busy),
+        }
+    }
+
+    async fn remove(&self, session_id: &str) {
+        self.entries.lock().await.remove(session_id);
+    }
+
+    async fn is_busy(&self, session_id: &str) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|semaphore| semaphore.available_permits() == 0)
+    }
+
+    async fn active_session_ids(&self) -> Vec<String> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, semaphore)| semaphore.available_permits() == 0)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    async fn active_count(&self) -> usize {
+        self.active_session_ids().await.len()
+    }
+}
+
+/// Deliver a steer input to a session's mailbox, tolerating the window where
+/// the turn permit is held but steer admission is (still or briefly) closed:
+/// a new turn is starting up — it reopens the mailbox inside
+/// `spawn_session_agent_turn` before its first model step — or the previous
+/// turn is mid-teardown. Degrading to `session.prompt` inside that window
+/// cannot work: the starting turn holds the permit for its entire duration,
+/// so the prompt fallback fails with -32001 "busy with another turn" and the
+/// steer is lost. Retry admission while the session is busy instead; a
+/// requeued steer is injected before the turn's next model step
+/// (`drain_steers_into_messages`). When no permit is held the session is
+/// idle and the input degrades immediately so the prompt path takes over.
+///
+/// Returns `Ok(())` when the input was admitted to the mailbox (steered),
+/// or `Err(input)` to degrade to the prompt path.
+async fn push_steer_tolerating_turn_start(
+    mailbox: &SessionSteerMailbox,
+    turn_locks: &SessionTurnLocks,
+    session_id: &str,
+    mut input: SteerInput,
+    grace: Duration,
+) -> Result<(), SteerInput> {
+    let deadline = std::time::Instant::now() + grace;
+    let mut retried = false;
+    loop {
+        match mailbox.try_push(input.clone()) {
+            Ok(()) => {
+                if retried {
+                    tracing::info!(
+                        "steer admission reopened after retry for session {session_id}; \
+                         input queued for the next model step"
+                    );
+                }
+                return Ok(());
+            }
+            Err(pending) => {
+                input = pending;
+            }
+        }
+        if !turn_locks.is_busy(session_id).await {
+            return Err(input);
+        }
+        retried = true;
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "steer admission stayed closed for {grace:?} while session {session_id} \
+                 was busy; degrading to prompt (input may fail with busy)"
+            );
+            return Err(input);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+impl ServerState {
+    fn client_count(&self) -> usize {
+        self.client_count.load(Ordering::SeqCst)
+    }
+
+    /// Per-session goal state, lazily created and restored from the session's store dir.
+    fn goal_file(&self, session_id: &str) -> PathBuf {
+        if !is_safe_session_id(session_id) {
+            // Path traversal guard: fall back to a sanitized placeholder.
+            return self.home_dir.join(".kkagent").join("goal-invalid.json");
+        }
+        let dir = kkagent_core::session::store::SessionStore::open_default()
+            .get(session_id)
+            .ok()
+            .map(|summary| PathBuf::from(summary.session_dir));
+        dir.unwrap_or_else(|| {
+            self.home_dir
+                .join(".kkagent")
+                .join("sessions")
+                .join(session_id)
+        })
+        .join("goal.json")
+    }
+
+    pub async fn goal_for(&self, session_id: &str) -> Arc<kkagent_protocol::goal::GoalManager> {
+        let mut managers = self.goal_managers.lock().await;
+        if let Some(mgr) = managers.get(session_id) {
+            return mgr.clone();
+        }
+        let mgr = Arc::new(
+            kkagent_protocol::goal::GoalManager::with_persist(self.goal_file(session_id)).await,
+        );
+        managers.insert(session_id.to_string(), mgr.clone());
+        mgr
+    }
+
+    /// Drop a session's goal manager and delete its persisted snapshot.
+    pub async fn drop_goal(&self, session_id: &str) {
+        let mgr = self.goal_managers.lock().await.remove(session_id);
+        if let Some(mgr) = mgr {
+            mgr.clear_goal().await;
+        }
+        let path = self.goal_file(session_id);
+        if let Err(error) = tokio::fs::remove_file(&path).await {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("goal cleanup {}: {error}", path.display());
+            }
+        }
+    }
+
+    async fn has_active_turns(&self) -> bool {
+        self.turn_locks.active_count().await > 0
+    }
+
+    fn request_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    fn register_rpc_event_subscriber(&self, tx: mpsc::Sender<Frame>) -> u64 {
+        let id = self.rpc_event_subscriber_seq.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+        self.rpc_event_subscribers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, tx);
+        id
+    }
+
+    fn unregister_rpc_event_subscriber(&self, id: u64) {
+        self.rpc_event_subscribers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+    }
+
+    /// Fan-out an event frame to every attached RPC client.
+    /// Slow/full clients skip a frame; closed clients are pruned.
+    /// Agent events are also mirrored onto the HTTP WebSocket bus so the Web UI
+    /// can stream the same turn / BTW updates.
+    fn publish_rpc_event(&self, frame: Frame) {
+        if let Frame::Event { data, .. } = &frame {
+            let _ = self.events.send(data.clone());
+        }
+        let mut subscribers = self
+            .rpc_event_subscribers
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        retain_rpc_event_subscribers(&mut subscribers, frame);
+    }
+
+    async fn remember_pending_question(
+        &self,
+        session_id: &str,
+        question: &kkagent_protocol::QuestionPayload,
+    ) {
+        self.pending_questions.lock().await.insert(
+            question.question_id.clone(),
+            serde_json::json!({
+                "session_id": session_id,
+                "question": question,
+            }),
+        );
+    }
+
+    async fn clear_pending_question(&self, session_id: &str, question_id: Option<&str>) {
+        let mut pending = self.pending_questions.lock().await;
+        if let Some(qid) = question_id.filter(|id| !id.is_empty()) {
+            pending.remove(qid);
+            return;
+        }
+        pending.retain(|_, value| {
+            value
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|sid| sid != session_id)
+                .unwrap_or(true)
+        });
+    }
+
+    async fn pending_question_for_session(&self, session_id: &str) -> Option<serde_json::Value> {
+        self.pending_questions
+            .lock()
+            .await
+            .values()
+            .find_map(|value| {
+                let sid = value.get("session_id").and_then(|v| v.as_str())?;
+                if sid != session_id {
+                    return None;
+                }
+                value.get("question").cloned()
+            })
+    }
+
+    async fn remember_pending_tool_approval(&self, request: kkagent_protocol::ApprovalRequest) {
+        self.pending_tool_approvals
+            .lock()
+            .await
+            .insert(request.session_id.clone(), request);
+    }
+
+    async fn clear_pending_tool_approval(&self, session_id: &str, approval_id: Option<&str>) {
+        let mut pending = self.pending_tool_approvals.lock().await;
+        if let Some(aid) = approval_id.filter(|id| !id.is_empty()) {
+            if pending
+                .get(session_id)
+                .map(|req| req.approval_id == aid)
+                .unwrap_or(false)
+            {
+                pending.remove(session_id);
+            }
+            return;
+        }
+        pending.remove(session_id);
+    }
+
+    async fn pending_tool_approval_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<kkagent_protocol::ApprovalRequest> {
+        self.pending_tool_approvals
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
+    async fn set_reconnect_status(&self, session_id: &str, status: SessionStatus) {
+        let mut map = self.reconnect_ui.lock().await;
+        let entry = map.entry(session_id.to_string()).or_default();
+        entry.status = Some(status);
+        if matches!(status, SessionStatus::Idle) {
+            entry.thinking_text.clear();
+            entry.assistant_text.clear();
+            entry.llm_retry = None;
+        }
+    }
+
+    /// True while a background turn owns this session (between checkout and
+    /// checkin). Transcript-bearing events that arrive after checkin must not
+    /// recreate reconnect state, or `get_session` would append a stale copy of
+    /// already-persisted messages.
+    async fn session_is_checked_out(&self, session_id: &str) -> bool {
+        self.in_flight_views.lock().await.contains_key(session_id)
+    }
+
+    async fn reconnect_status_for_session(&self, session_id: &str) -> Option<SessionStatus> {
+        self.reconnect_ui
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|ui| ui.status)
+    }
+
+    async fn reconnect_live_for_session(&self, session_id: &str) -> Option<serde_json::Value> {
+        let ui = self.reconnect_ui.lock().await.get(session_id)?.clone();
+        if ui.thinking_text.is_empty() && ui.assistant_text.is_empty() && ui.llm_retry.is_none() {
+            return None;
+        }
+        Some(serde_json::json!({
+            "thinking_text": ui.thinking_text,
+            "assistant_text": ui.assistant_text,
+            "llm_retry": ui.llm_retry.as_ref().map(|retry| serde_json::json!({
+                "retry_number": retry.retry_number,
+                "reason": retry.reason,
+                "remaining_seconds": retry.remaining_seconds,
+            })),
+        }))
+    }
+
+    async fn resume_messages_for_active_turn(
+        &self,
+        session_id: &str,
+        db_messages: Vec<ChatMessage>,
+    ) -> Vec<ChatMessage> {
+        let base = {
+            let views = self.in_flight_views.lock().await;
+            views
+                .get(session_id)
+                .and_then(|view| {
+                    view.get("messages").and_then(|value| {
+                        serde_json::from_value::<Vec<ChatMessage>>(value.clone()).ok()
+                    })
+                })
+                .unwrap_or(db_messages)
+        };
+        let mut partial = self
+            .reconnect_ui
+            .lock()
+            .await
+            .get(session_id)
+            .map(|ui| {
+                let mut msgs = ui.partial_messages.clone();
+                // Flush any accumulated thinking/text deltas that haven't been
+                // committed to partial_messages yet (they are only flushed when a
+                // ToolCall arrives).  Without this, reconnecting during a pure
+                // thinking/text phase — or between two tool calls — silently drops
+                // the in-flight assistant content.
+                let thinking = ui.thinking_text.clone();
+                let text = ui.assistant_text.clone();
+                if !thinking.is_empty() || !text.is_empty() {
+                    let mut content = Vec::new();
+                    if !thinking.is_empty() {
+                        content.push(ChatContent::Thinking {
+                            thinking: thinking.clone(),
+                        });
+                    }
+                    if !text.is_empty() {
+                        content.push(ChatContent::Text { text: text.clone() });
+                    }
+                    if reconnect_open_assistant_step(&msgs) {
+                        // Append to the last open assistant message.
+                        if let Some(last) = msgs.last_mut() {
+                            last.content.extend(content);
+                        }
+                    } else {
+                        msgs.push(ChatMessage {
+                            role: "assistant".into(),
+                            content,
+                            tools: None,
+                        });
+                    }
+                }
+                msgs
+            })
+            .unwrap_or_default();
+        let mut merged = base;
+        merged.append(&mut partial);
+        merged
+    }
+
+    async fn remember_pending_btw(&self, session_id: &str, snapshot: PendingBtwUi) {
+        self.pending_btw
+            .lock()
+            .await
+            .insert(session_id.to_string(), snapshot);
+    }
+
+    async fn clear_pending_btw(&self, session_id: &str) {
+        self.pending_btw.lock().await.remove(session_id);
+    }
+
+    async fn pending_btw_for_session(&self, session_id: &str) -> Option<serde_json::Value> {
+        let btw = self.pending_btw.lock().await.get(session_id)?.clone();
+        Some(serde_json::json!({
+            "agent_id": btw.agent_id,
+            "question": btw.question,
+            "answer": btw.answer,
+            "thinking": btw.thinking,
+            "streaming": btw.streaming,
+            "retry_status": btw.retry_status,
+            "turns": btw.turns,
+        }))
+    }
+
+    async fn set_prompt_queue_snapshot(&self, session_id: &str, snapshot: PromptQueueSnapshot) {
+        let mut queues = self.prompt_queues.lock().await;
+        if snapshot.items.is_empty() {
+            queues.remove(session_id);
+        } else {
+            queues.insert(session_id.to_string(), snapshot);
+        }
+    }
+
+    async fn prompt_queue_for_session(&self, session_id: &str) -> Option<serde_json::Value> {
+        let queue = self.prompt_queues.lock().await.get(session_id)?.clone();
+        Some(serde_json::json!({
+            "selected": queue.selected,
+            "items": queue.items.iter().map(|item| serde_json::json!({
+                "id": item.id,
+                "text": item.text,
+                "images": item.images.iter().map(|(media_type, data)| serde_json::json!({
+                    "media_type": media_type,
+                    "data": data,
+                })).collect::<Vec<_>>(),
+                "as_steer": item.as_steer,
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn upsert_pending_subagent(&self, session_id: &str, entry: PendingSubagentUi) {
+        let mut map = self.pending_subagents.lock().await;
+        let list = map.entry(session_id.to_string()).or_default();
+        if let Some(existing) = list
+            .iter_mut()
+            .find(|item| item.subagent_id == entry.subagent_id)
+        {
+            *existing = entry;
+        } else {
+            list.push(entry);
+        }
+    }
+
+    async fn update_pending_subagent_status(
+        &self,
+        session_id: &str,
+        subagent_id: &str,
+        status: &str,
+        detail: Option<String>,
+    ) {
+        let mut map = self.pending_subagents.lock().await;
+        if let Some(list) = map.get_mut(session_id) {
+            if let Some(entry) = list.iter_mut().find(|item| item.subagent_id == subagent_id) {
+                entry.status = status.to_string();
+                if detail.is_some() {
+                    entry.detail = detail;
+                }
+            }
+        }
+    }
+
+    async fn push_pending_subagent_child(&self, session_id: &str, subagent_id: &str, line: String) {
+        let mut map = self.pending_subagents.lock().await;
+        if let Some(list) = map.get_mut(session_id) {
+            if let Some(entry) = list.iter_mut().find(|item| item.subagent_id == subagent_id) {
+                entry.recent_child_events.push(line);
+                const MAX_CHILD: usize = 12;
+                if entry.recent_child_events.len() > MAX_CHILD {
+                    let skip = entry.recent_child_events.len() - MAX_CHILD;
+                    entry.recent_child_events.drain(0..skip);
+                }
+            }
+        }
+    }
+
+    async fn clear_pending_subagents(&self, session_id: &str) {
+        self.pending_subagents.lock().await.remove(session_id);
+    }
+
+    async fn pending_subagents_for_session(&self, session_id: &str) -> Option<serde_json::Value> {
+        let list = self.pending_subagents.lock().await.get(session_id)?.clone();
+        if list.is_empty() {
+            return None;
+        }
+        Some(serde_json::json!(list
+            .into_iter()
+            .map(|item| serde_json::json!({
+                "subagent_id": item.subagent_id,
+                "subagent_name": item.subagent_name,
+                "parent_tool_call_id": item.parent_tool_call_id,
+                "description": item.description,
+                "status": item.status,
+                "detail": item.detail,
+                "recent_child_events": item.recent_child_events,
+                "model": item.model,
+            }))
+            .collect::<Vec<_>>()))
+    }
+
+    async fn resume_status_for_session(
+        &self,
+        session_id: &str,
+        turn_active: bool,
+        has_pending_approval: bool,
+        has_pending_question: bool,
+    ) -> SessionStatus {
+        if has_pending_approval {
+            return SessionStatus::WaitingApproval;
+        }
+        if has_pending_question {
+            return SessionStatus::WaitingQuestion;
+        }
+        if let Some(status) = self.reconnect_status_for_session(session_id).await {
+            return status;
+        }
+        if turn_active {
+            SessionStatus::Thinking
+        } else {
+            SessionStatus::Idle
+        }
+    }
+
+    async fn resume_reconnect_fields(
+        &self,
+        session_id: &str,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut extra = serde_json::Map::new();
+        if let Some(live) = self.reconnect_live_for_session(session_id).await {
+            extra.insert("live_ui".into(), live);
+        }
+        if let Some(btw) = self.pending_btw_for_session(session_id).await {
+            extra.insert("pending_btw".into(), btw);
+        }
+        if let Some(queue) = self.prompt_queue_for_session(session_id).await {
+            extra.insert("prompt_queue".into(), queue);
+        }
+        if let Some(goal) = self.goal_for(session_id).await.get_goal().await {
+            extra.insert(
+                "goal".into(),
+                serde_json::json!({
+                    "status": goal.status,
+                    "description": goal.description,
+                }),
+            );
+        }
+        if let Some(subagents) = self.pending_subagents_for_session(session_id).await {
+            extra.insert("pending_subagents".into(), subagents);
+        }
+        extra
+    }
+
+    async fn note_agent_event_for_resume(&self, evt: &AgentEvent) {
+        match evt {
+            AgentEvent::UsageUpdate {
+                session_id,
+                usage,
+                by_model,
+                ..
+            } => {
+                // Keep a server-side snapshot so a reattached TUI can rebuild
+                // /usage session totals without replaying the event stream.
+                let mut map = self.session_usage.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.input_tokens = entry.input_tokens.saturating_add(usage.input_tokens);
+                entry.output_tokens = entry.output_tokens.saturating_add(usage.output_tokens);
+                entry.cache_creation_input_tokens = entry
+                    .cache_creation_input_tokens
+                    .saturating_add(usage.cache_creation_input_tokens);
+                entry.cache_read_input_tokens = entry
+                    .cache_read_input_tokens
+                    .saturating_add(usage.cache_read_input_tokens);
+                if usage.input_includes_cache.is_some() {
+                    entry.input_includes_cache = usage.input_includes_cache;
+                }
+                // The authoritative per-model breakdown replaces the folded one.
+                if !by_model.is_empty() {
+                    *entry = by_model.iter().fold(
+                        kkagent_protocol::ModelUsageEntry::default(),
+                        |mut acc, e| {
+                            acc.calls += e.calls;
+                            acc.input_tokens += e.input_tokens;
+                            acc.output_tokens += e.output_tokens;
+                            acc.cache_creation_input_tokens += e.cache_creation_input_tokens;
+                            acc.cache_read_input_tokens += e.cache_read_input_tokens;
+                            if e.input_includes_cache.is_some() {
+                                acc.input_includes_cache = e.input_includes_cache;
+                            }
+                            acc
+                        },
+                    );
+                }
+            }
+            AgentEvent::SubagentCompleted {
+                session_id,
+                usage: Some(usage),
+                ..
+            } => {
+                let mut map = self.session_usage.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.input_tokens = entry.input_tokens.saturating_add(usage.input_tokens);
+                entry.output_tokens = entry.output_tokens.saturating_add(usage.output_tokens);
+                entry.cache_creation_input_tokens = entry
+                    .cache_creation_input_tokens
+                    .saturating_add(usage.cache_creation_input_tokens);
+                entry.cache_read_input_tokens = entry
+                    .cache_read_input_tokens
+                    .saturating_add(usage.cache_read_input_tokens);
+                if usage.input_includes_cache.is_some() {
+                    entry.input_includes_cache = usage.input_includes_cache;
+                }
+            }
+            AgentEvent::QuestionAsked {
+                session_id,
+                question,
+            } => {
+                self.remember_pending_question(session_id, question).await;
+                self.set_reconnect_status(session_id, SessionStatus::WaitingQuestion)
+                    .await;
+            }
+            AgentEvent::ApprovalRequested { request, .. } => {
+                self.remember_pending_tool_approval(request.clone()).await;
+                self.set_reconnect_status(&request.session_id, SessionStatus::WaitingApproval)
+                    .await;
+            }
+            AgentEvent::StatusUpdate {
+                session_id, status, ..
+            } => {
+                self.set_reconnect_status(session_id, *status).await;
+                if matches!(
+                    status,
+                    SessionStatus::Thinking | SessionStatus::ToolExecuting
+                ) {
+                    let mut map = self.reconnect_ui.lock().await;
+                    if let Some(ui) = map.get_mut(session_id) {
+                        ui.llm_retry = None;
+                    }
+                }
+            }
+            AgentEvent::ThinkingDelta {
+                session_id, text, ..
+            } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.thinking_text.push_str(text);
+            }
+            AgentEvent::MessageDelta {
+                session_id, text, ..
+            } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.assistant_text.push_str(text);
+            }
+            AgentEvent::ToolCall {
+                session_id,
+                tool_call_id,
+                tool_name,
+                input,
+                ..
+            } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                reconnect_append_tool_call(
+                    entry,
+                    tool_call_id.clone(),
+                    tool_name.clone(),
+                    input.clone(),
+                );
+            }
+            AgentEvent::ToolResult {
+                session_id,
+                tool_call_id,
+                output,
+                is_error,
+                ..
+            } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.partial_messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: vec![ChatContent::ToolResult {
+                        tool_use_id: tool_call_id.clone(),
+                        content: output.clone(),
+                        is_error: *is_error,
+                    }],
+                    tools: None,
+                });
+            }
+            AgentEvent::LlmRetry {
+                session_id,
+                retry_number,
+                reason,
+                remaining_seconds,
+                ..
+            } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.llm_retry = Some(LlmRetryUi {
+                    retry_number: *retry_number,
+                    reason: reason.clone(),
+                    remaining_seconds: *remaining_seconds,
+                });
+                entry.status = Some(SessionStatus::Thinking);
+            }
+            AgentEvent::TurnStart { session_id, .. } => {
+                if !self.session_is_checked_out(session_id).await {
+                    return;
+                }
+                let mut map = self.reconnect_ui.lock().await;
+                let entry = map.entry(session_id.clone()).or_default();
+                entry.thinking_text.clear();
+                entry.assistant_text.clear();
+                entry.llm_retry = None;
+                entry.partial_messages.clear();
+                entry.status = Some(SessionStatus::Thinking);
+            }
+            AgentEvent::TurnEnd { session_id, .. } => {
+                self.clear_pending_question(session_id, None).await;
+                self.clear_pending_tool_approval(session_id, None).await;
+                self.clear_pending_subagents(session_id).await;
+                // Do NOT drop the transcript tail here. TurnEnd is observed by
+                // the event forwarding task, which races ahead of the turn
+                // runner's persist + checkin. Clearing partial state in this
+                // window made `get_session` return a stale pre-turn view and
+                // silently dropped the whole turn's thinking/tool history on
+                // reconnect. The entry is fully cleared by `checkin_session`
+                // once the persisted history is back in place; only the
+                // transient status fields are reset here.
+                let mut map = self.reconnect_ui.lock().await;
+                if let Some(entry) = map.get_mut(session_id) {
+                    entry.status = None;
+                    entry.llm_retry = None;
+                }
+            }
+            AgentEvent::SubagentSpawned {
+                session_id,
+                subagent_id,
+                subagent_name,
+                parent_tool_call_id,
+                description,
+                model,
+                ..
+            } => {
+                self.upsert_pending_subagent(
+                    session_id,
+                    PendingSubagentUi {
+                        subagent_id: subagent_id.clone(),
+                        subagent_name: subagent_name.clone(),
+                        parent_tool_call_id: parent_tool_call_id.clone(),
+                        description: description.clone().unwrap_or_default(),
+                        status: "pending".into(),
+                        detail: None,
+                        recent_child_events: Vec::new(),
+                        model: model.clone(),
+                    },
+                )
+                .await;
+            }
+            AgentEvent::SubagentStarted {
+                session_id,
+                subagent_id,
+                ..
+            } => {
+                self.update_pending_subagent_status(session_id, subagent_id, "running", None)
+                    .await;
+            }
+            AgentEvent::SubagentCompleted {
+                session_id,
+                subagent_id,
+                result_summary,
+                ..
+            } => {
+                self.update_pending_subagent_status(
+                    session_id,
+                    subagent_id,
+                    "complete",
+                    Some(result_summary.chars().take(240).collect()),
+                )
+                .await;
+            }
+            AgentEvent::SubagentFailed {
+                session_id,
+                subagent_id,
+                error,
+                ..
+            } => {
+                self.update_pending_subagent_status(
+                    session_id,
+                    subagent_id,
+                    "failed",
+                    Some(error.chars().take(240).collect()),
+                )
+                .await;
+            }
+            AgentEvent::SubagentChildEvent {
+                session_id,
+                subagent_id,
+                event,
+                ..
+            } => {
+                let line = match event.as_ref() {
+                    AgentEvent::ToolCall {
+                        tool_name, input, ..
+                    } => {
+                        let brief = serde_json::to_string(input)
+                            .unwrap_or_default()
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
+                        Some(format!("tool {tool_name} {brief}"))
+                    }
+                    AgentEvent::ToolResult {
+                        tool_name,
+                        output,
+                        is_error,
+                        ..
+                    } => {
+                        let mark = if *is_error { "!" } else { "ok" };
+                        Some(format!(
+                            "{tool_name} [{mark}] {}",
+                            output.chars().take(120).collect::<String>()
+                        ))
+                    }
+                    AgentEvent::Error { message, .. } => Some(format!("error: {message}")),
+                    _ => None,
+                };
+                if let Some(line) = line {
+                    self.push_pending_subagent_child(session_id, subagent_id, line)
+                        .await;
+                }
+            }
+            AgentEvent::TodoUpdated {
+                session_id, items, ..
+            } => {
+                let mut views = self.in_flight_views.lock().await;
+                if let Some(object) = views
+                    .get_mut(session_id)
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    object.insert(
+                        "todos".into(),
+                        serde_json::to_value(items).unwrap_or_default(),
+                    );
+                }
+            }
+            AgentEvent::CompactCompleted { session_id, .. } => {
+                self.set_reconnect_status(session_id, SessionStatus::Idle)
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.http_runtime.abort().await;
+        for (_, handle) in self.abort_registry.lock().await.drain() {
+            handle.abort();
+        }
+        for handle in self.background_tasks.lock().await.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+/// Keep live writers; drop closed ones. Full queues stay subscribed but skip the frame.
+fn retain_rpc_event_subscribers(subscribers: &mut HashMap<u64, mpsc::Sender<Frame>>, frame: Frame) {
+    subscribers.retain(|_, tx| match tx.try_send(frame.clone()) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+    });
+}
+
+fn configured_mcp_servers(config: &AppConfig) -> Vec<kkagent_mcp::McpServerConfig> {
+    // Keep every configured server so /mcp can re-enable at runtime.
+    config
+        .mcp_servers
+        .iter()
+        .map(|(name, cfg)| kkagent_mcp::McpServerConfig::from_app(name.clone(), cfg))
+        .collect()
+}
+
+async fn combined_mcp_servers(
+    config: &AppConfig,
+    plugins: &kkagent_core::PluginManager,
+) -> Vec<kkagent_mcp::McpServerConfig> {
+    let mut configs = configured_mcp_servers(config);
+    configs.extend(plugins.mcp_server_configs().await);
+    configs
+}
+
+fn configured_plugin_marketplace_catalogs(
+    config: &AppConfig,
+) -> Vec<kkagent_config::PluginMarketplaceCatalog> {
+    let mut catalogs = config.plugin_marketplace_catalogs();
+    if catalogs.is_empty() {
+        let local = kkagent_config::default_config_dir()
+            .join("plugins")
+            .join("marketplace.json");
+        if local.is_file() {
+            catalogs.push(kkagent_config::PluginMarketplaceCatalog {
+                source: local.display().to_string(),
+                name: None,
+            });
+        }
+    }
+    catalogs
+}
+
+fn configured_plugin_marketplace(config: &AppConfig, explicit: Option<&str>) -> Result<String> {
+    explicit
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            configured_plugin_marketplace_catalogs(config)
+                .into_iter()
+                .next()
+                .map(|catalog| catalog.source)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin marketplace is not configured; set plugin_marketplace / plugin_marketplaces in config.toml, \
+                 KKAGENT_PLUGIN_MARKETPLACE_URL, or pass a source"
+            )
+        })
+}
+
+async fn refresh_plugin_mcp(state: &ServerState) -> Result<(usize, usize)> {
+    let configs = combined_mcp_servers(state.config().as_ref(), &state.plugins).await;
+    let mut disabled: std::collections::HashSet<String> =
+        state.mcp.disabled_names().await.into_iter().collect();
+    disabled.extend(
+        configs
+            .iter()
+            .filter(|server| !server.enabled)
+            .map(|server| server.name.clone()),
+    );
+    state.mcp.set_disabled_names(disabled).await;
+    state.mcp.replace_configs(configs).await?;
+    // Prompt overrides are manifest-level: refresh them on every plugin
+    // mutation so active sessions pick the change up on their next turn.
+    kkagent_core::plugin_overrides::sync_system_prompt_override(&state.plugins).await;
+    // Service overrides too: rebuild the web backends so the next turn's
+    // WebTool uses the effective plugin-declared provider.
+    rebuild_web_services(state).await;
+    Ok((
+        state.mcp.configured_count(),
+        state.mcp.list_tools().await.len(),
+    ))
+}
+
+/// Recompute `WebServicesConfig` from user config + plugin service overrides.
+async fn rebuild_web_services(state: &ServerState) {
+    let (svc_overrides, svc_losers) = state.plugins.service_overrides().await;
+    for (service, names) in &svc_losers {
+        tracing::warn!(
+            service,
+            losers = names.join(", "),
+            "multiple plugins override the same service; first by plugin id wins"
+        );
+    }
+    let mut web_cfg = kkagent_tools::WebServicesConfig::from_app(state.config().as_ref());
+    let svc_as_config = kkagent_config::ServicesConfig {
+        web_search: svc_overrides.web_search,
+        web_fetch: svc_overrides.web_fetch,
+        moonshot_search: None,
+        moonshot_fetch: None,
+    };
+    web_cfg.merge_plugin_overrides(&svc_as_config);
+    *state.web.write().await = Arc::new(web_cfg);
+}
+
+async fn install_marketplace_plugin(
+    state: &ServerState,
+    id: &str,
+    explicit_marketplace: Option<&str>,
+) -> Result<kkagent_core::InstalledPluginRecord> {
+    let cwd = std::env::current_dir()?;
+    let mut sources = Vec::new();
+    if let Some(explicit) = explicit_marketplace
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sources.push(explicit.to_string());
+    } else {
+        for catalog in configured_plugin_marketplace_catalogs(state.config().as_ref()) {
+            sources.push(catalog.source);
+        }
+        for marketplace in state.plugins.registered_marketplaces().await? {
+            if !sources.iter().any(|source| source == &marketplace.source) {
+                sources.push(marketplace.source);
+            }
+        }
+    }
+    if sources.is_empty() {
+        anyhow::bail!(
+            "plugin marketplace is not configured; set plugin_marketplace / plugin_marketplaces in config.toml, \
+             KKAGENT_PLUGIN_MARKETPLACE_URL, or pass a source"
+        );
+    }
+    for source in &sources {
+        let marketplace = state.plugins.marketplace(source, &cwd).await?;
+        if let Some(entry) = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+        {
+            return state
+                .plugins
+                .install(&entry.source, Some((&marketplace.source, &entry)))
+                .await;
+        }
+    }
+    anyhow::bail!("plugin {id} was not found in {}", sources.join(", "))
+}
+
+fn open_transcript_with_policy(
+    path: &Path,
+    allow_in_memory: bool,
+) -> Result<(kkagent_core::SharedSqlite, bool, Option<String>)> {
+    match kkagent_core::open_shared_sqlite(path) {
+        Ok(database) => Ok((database, true, None)),
+        Err(error) if allow_in_memory => {
+            tracing::error!(
+                "Failed to open transcript DB: {error}; explicitly entering in-memory degraded mode"
+            );
+            Ok((
+                kkagent_core::open_shared_sqlite_memory().map_err(|memory_error| {
+                    anyhow::anyhow!(
+                        "cannot open transcript DB (durable={error}, memory={memory_error})"
+                    )
+                })?,
+                false,
+                Some(error.to_string()),
+            ))
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "cannot open durable transcript DB: {error}; set KKAGENT_ALLOW_IN_MEMORY_TRANSCRIPTS=1 only for explicit degraded operation"
+        )),
+    }
+}
+
+async fn build_server_state(
+    config: Arc<AppConfig>,
+    config_path: PathBuf,
+) -> Result<Arc<ServerState>> {
+    let (shutdown_tx, _) = watch::channel(false);
+    build_server_state_with_shutdown(
+        config,
+        config_path,
+        shutdown_tx,
+        kkagent_rpc::HttpSecurityOptions::default(),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_server_state_with_shutdown(
+    config: Arc<AppConfig>,
+    config_path: PathBuf,
+    shutdown_tx: watch::Sender<bool>,
+    http_security: kkagent_rpc::HttpSecurityOptions,
+    // Test-only override for the transcript DB path. Production callers
+    // pass None and get `<config dir>/transcripts.db`; tests must pass a
+    // unique temp path so they neither race the shared schema nor touch
+    // the user's real transcript data.
+    transcript_db_override: Option<PathBuf>,
+) -> Result<Arc<ServerState>> {
+    let startup_started = std::time::Instant::now();
+    let (events, _) = tokio::sync::broadcast::channel(1024);
+    let allow_in_memory = std::env::var("KKAGENT_ALLOW_IN_MEMORY_TRANSCRIPTS")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let transcript_path = transcript_db_override
+        .unwrap_or_else(|| kkagent_config::default_config_dir().join("transcripts.db"));
+    let (shared_sqlite, persistence_durable, persistence_error) =
+        open_transcript_with_policy(&transcript_path, allow_in_memory)?;
+    // Durable cross-session token usage history shares the transcript DB
+    // (same WAL connection pool; one more table pair, no extra file).
+    match kkagent_core::UsageStore::from_shared(shared_sqlite.clone()) {
+        Ok(usage_store) => {
+            kkagent_core::usage_store::set_global(usage_store);
+            kkagent_core::usage_store::cleanup_expired_global();
+        }
+        Err(error) => tracing::warn!("usage history unavailable: {error:#}"),
+    }
+    // One Connection for transcript + durable HTTP + subagents (avoid triple open/busy_timeout).
+    let transcript = TranscriptDb::from_shared(shared_sqlite.clone())?;
+    let db_for_tool_results = TranscriptDb::from_shared(shared_sqlite.clone())?;
+    let durable_http = kkagent_rpc::DurableHttpStore::from_shared(shared_sqlite.clone())?;
+    let subagents = Arc::new(SubagentManager::from_shared(4, shared_sqlite)?);
+    // Legacy cleanup: old builds persisted subagent runs as real sessions,
+    // leaving empty `sub-*` entries in /sessions. Sweep them once at startup;
+    // subagent sessions are ephemeral since SessionCreateSource::Subagent.
+    match SessionStore::open_default().sweep_orphan_subagent_sessions() {
+        Ok(swept) if !swept.is_empty() => {
+            tracing::info!("swept {} orphan subagent session(s)", swept.len())
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("orphan subagent session sweep failed: {error}"),
+    }
+    let sandbox_policy = kkagent_tools::sandbox::SandboxPolicy::from_app_config(&config)?;
+    if let Some(reason) = sandbox_policy.auto_fallback_warning.as_ref() {
+        kkagent_core::audit::record(&kkagent_core::audit::AuditEvent::SandboxFallback {
+            at: &kkagent_core::audit::now_rfc3339(),
+            configured: "auto",
+            effective: sandbox_policy.mode_name(),
+            reason,
+        });
+    }
+    // Windows never gets filesystem isolation: surface the posture in the
+    // audit trail instead of failing silently (task 8 short-term).
+    if cfg!(windows) && sandbox_policy.mode == kkagent_tools::sandbox::SandboxMode::Process {
+        kkagent_core::audit::record(&kkagent_core::audit::AuditEvent::SandboxFallback {
+            at: &kkagent_core::audit::now_rfc3339(),
+            configured: &sandbox_policy.configured_mode,
+            effective: "process",
+            reason: "filesystem sandbox unsupported on Windows; only resource limits apply",
+        });
+    }
+
+    let plugins_dir = kkagent_config::default_config_dir().join("plugins");
+    let plugins = kkagent_core::PluginManager::discover(&plugins_dir).await;
+    // Install any plugin base-prompt replacement before sessions are created.
+    kkagent_core::plugin_overrides::sync_system_prompt_override(&plugins).await;
+    let mcp_configs = combined_mcp_servers(&config, &plugins).await;
+    let mcp_server_count = mcp_configs.len();
+    let mcp_servers_configured = !mcp_configs.is_empty();
+    let initially_disabled: Vec<String> = mcp_configs
+        .iter()
+        .filter(|server| {
+            !server.enabled
+                || config
+                    .disabled_mcp_servers
+                    .iter()
+                    .any(|name| name == &server.name)
+        })
+        .map(|server| server.name.clone())
+        .collect();
+    let mcp = Arc::new(McpManager::new(mcp_configs));
+    {
+        mcp.set_disabled_names(initially_disabled).await;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut hooks_mgr = kkagent_mcp::HookManager::new(&cwd);
+    hooks_mgr.load_from_app_config(&config.hooks).await;
+    let cron_path = kkagent_config::default_config_dir().join("cron.json");
+    let mcp_connect = mcp.clone();
+    let extra_skill_dirs = config.extra_skill_dirs.clone();
+    let merge_all_available_skills = config.merge_all_available_skills;
+    let mut background_tasks = Vec::new();
+
+    // MCP startup can involve subprocess launches, remote handshakes, or OAuth.
+    // Begin it immediately, but do not keep the TUI's first frame waiting for it.
+    // Agent turns synchronize on McpManager::wait_until_initialized below.
+    // TUI discovers readiness via `mcp.status` polling / turn-time mcp.status events.
+    if mcp_servers_configured {
+        let task = tokio::spawn(async move {
+            match mcp_connect.connect_all().await {
+                Ok(()) => {
+                    let n = mcp_connect.list_tools().await.len();
+                    tracing::info!("MCP ready: {} server(s), {} tool(s)", mcp_server_count, n);
+                }
+                Err(e) => tracing::warn!("MCP connect_all error: {}", e),
+            }
+        });
+        background_tasks.push(task.abort_handle());
+    }
+
+    // Only local state needed by session creation remains on the critical path.
+    let (skills, hooks_discover, cron) = tokio::join!(
+        kkagent_tools::SkillCatalog::configured(
+            &cwd,
+            &extra_skill_dirs,
+            merge_all_available_skills,
+        ),
+        hooks_mgr.discover(),
+        kkagent_tools::CronManager::with_persist(cron_path),
+    );
+
+    if let Err(e) = hooks_discover {
+        tracing::warn!("hooks discover error: {e}");
+    }
+
+    let hooks = Arc::new(hooks_mgr);
+    let skills = Arc::new(skills);
+    skills.set_disabled(config.disabled_skills.clone()).await;
+    let cron = Arc::new(cron);
+    let goal_managers: Mutex<HashMap<String, Arc<kkagent_protocol::goal::GoalManager>>> =
+        Mutex::new(HashMap::new());
+    let goal_judge_records: Mutex<HashMap<String, Vec<kkagent_core::goal_judge::GoalJudgeRecord>>> =
+        Mutex::new(HashMap::new());
+    let judge_chat_history: Mutex<HashMap<String, Vec<(String, String)>>> =
+        Mutex::new(HashMap::new());
+    let judge_chat_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>> =
+        Mutex::new(HashMap::new());
+    let session_usage: Mutex<HashMap<String, kkagent_protocol::ModelUsageEntry>> =
+        Mutex::new(HashMap::new());
+    // Web backends: user config + plugin service overrides. The lock is
+    // written here at startup and by `rebuild_web_services` on plugin changes.
+    let mut web_cfg = kkagent_tools::WebServicesConfig::from_app(&config);
+    let (svc_overrides, _svc_losers) = plugins.service_overrides().await;
+    let svc_as_config = kkagent_config::ServicesConfig {
+        web_search: svc_overrides.web_search,
+        web_fetch: svc_overrides.web_fetch,
+        moonshot_search: None,
+        moonshot_fetch: None,
+    };
+    web_cfg.merge_plugin_overrides(&svc_as_config);
+    let web = tokio::sync::RwLock::new(Arc::new(web_cfg));
+
+    let cron_fires: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let cron_bg = cron.clone();
+        let fires = cron_fires.clone();
+        let hooks_cron = hooks.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let due = match cron_bg.take_due().await {
+                    Ok(due) => due,
+                    Err(error) => {
+                        tracing::warn!("cron dispatch skipped: {error:#}");
+                        continue;
+                    }
+                };
+                for (id, prompt, recurring) in due {
+                    let xml = kkagent_tools::render_cron_fire_xml(
+                        &id,
+                        "scheduled",
+                        &prompt,
+                        recurring,
+                        1,
+                        false,
+                    );
+                    tracing::info!(
+                        "Cron job {} due: {}",
+                        id,
+                        prompt.chars().take(80).collect::<String>()
+                    );
+                    fires.lock().await.push(xml);
+                    let _ = hooks_cron.fire_notification(&format!("cron:{id}")).await;
+                }
+            }
+        });
+        background_tasks.push(task.abort_handle());
+    }
+
+    let di_root = ServiceContainer::new("kkagent-root");
+    let telemetry = TelemetryService::new();
+    telemetry.add_appender(Arc::new(ConsoleAppender)).await;
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    telemetry
+        .add_appender(Arc::new(FileAppender::new(
+            home.join(".kkagent").join("telemetry").join("events.jsonl"),
+        )))
+        .await;
+    let cloud_opts = CloudAppenderOptions {
+        device_id: std::env::var("KKAGENT_DEVICE_ID")
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
+        model: config.default_model.clone(),
+        ..CloudAppenderOptions::default()
+    };
+    if std::env::var("KKAGENT_TELEMETRY_CLOUD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        telemetry.add_appender(CloudAppender::new(cloud_opts)).await;
+    }
+    let _ = di_root.register_instance(telemetry.clone());
+    let _ = di_root.register_instance(config.clone());
+    let startup_telemetry = telemetry.clone();
+    let task = tokio::spawn(async move {
+        startup_telemetry
+            .track_json(
+                "app_started",
+                serde_json::json!({
+                        "mcp_servers": mcp_server_count as u64,
+                }),
+            )
+            .await;
+    });
+    background_tasks.push(task.abort_handle());
+
+    let state = Arc::new(ServerState {
+        shared_config: StdRwLock::new(config.clone()),
+        config_path,
+        home_dir: home.clone(),
+        sandbox_policy: StdRwLock::new(sandbox_policy),
+        workspace_trust: StdRwLock::new(config.workspace_trust.clone()),
+        sessions: Mutex::new(HashMap::new()),
+        session_load_lock: Mutex::new(()),
+        approval_txs: Mutex::new(HashMap::new()),
+        question_txs: Mutex::new(HashMap::new()),
+        steer_mailboxes: Mutex::new(HashMap::new()),
+        active_btw_sessions: Mutex::new(HashMap::new()),
+        interrupt_flags: Mutex::new(HashMap::new()),
+        model_aliases: Mutex::new(HashMap::new()),
+        fallback_models: Mutex::new(HashMap::new()),
+        permission_modes: Mutex::new(HashMap::new()),
+        plan_mode_requests: Mutex::new(HashMap::new()),
+        abort_registry: Arc::new(Mutex::new(HashMap::new())),
+        transcript: Mutex::new(transcript),
+        tool_result_store: Arc::new(kkagent_core::agent_loop::ToolResultStore::new(
+            kkagent_config::default_config_dir(),
+            Some(db_for_tool_results),
+        )),
+        durable_http: durable_http.clone(),
+        http_runtime: HttpServerManager::new(http_security, durable_http),
+        subagents,
+        mcp,
+        bash_shells: Arc::new(kkagent_tools::builtin::BackgroundShellManager::new()),
+        cron,
+        cron_fires,
+        goal_managers,
+        goal_judge_records,
+        judge_chat_history,
+        judge_chat_locks,
+        session_usage,
+        hooks,
+        skills,
+        web,
+        plugins,
+        telemetry: telemetry.clone(),
+        events,
+        pending_questions: Mutex::new(HashMap::new()),
+        pending_tool_approvals: Mutex::new(HashMap::new()),
+        reconnect_ui: Mutex::new(HashMap::new()),
+        in_flight_views: Mutex::new(HashMap::new()),
+        pending_btw: Mutex::new(HashMap::new()),
+        prompt_queues: Mutex::new(HashMap::new()),
+        pending_subagents: Mutex::new(HashMap::new()),
+        background_tasks: Mutex::new(background_tasks),
+        turn_locks: SessionTurnLocks::default(),
+        prompt_idempotency: Mutex::new(HashMap::new()),
+        persistence_durable,
+        persistence_error,
+        started_at: std::time::Instant::now(),
+        client_count: AtomicUsize::new(0),
+        shutdown_tx,
+        rpc_event_subscribers: StdRwLock::new(HashMap::new()),
+        rpc_event_subscriber_seq: AtomicUsize::new(0),
+    });
+    let recovery_state = state.clone();
+    let recovery_task = tokio::spawn(async move {
+        recover_subagents(recovery_state).await;
+    });
+    state
+        .background_tasks
+        .lock()
+        .await
+        .push(recovery_task.abort_handle());
+    tracing::info!(
+        elapsed_ms = startup_started.elapsed().as_millis() as u64,
+        "Server state ready"
+    );
+    Ok(state)
+}
+
+async fn run_server_handler<T: kkagent_rpc::transport::AsyncTransport>(
+    transport: T,
+    config: Arc<AppConfig>,
+    config_path: PathBuf,
+) -> Result<()> {
+    let state = build_server_state(config, config_path).await?;
+    run_server_handler_with_state(transport, state).await;
+    Ok(())
+}
+
+async fn run_server_handler_with_state<T: kkagent_rpc::transport::AsyncTransport>(
+    transport: T,
+    state: Arc<ServerState>,
+) {
+    let handler: kkagent_rpc::server::RequestHandler = {
+        let state = state.clone();
+        Arc::new(move |_id, method, params, event_tx| {
+            let state = state.clone();
+            Box::pin(async move { handle_rpc_call(state, &method, params, event_tx).await })
+        })
+    };
+
+    let server = RpcServer::new(handler);
+    let state_start = state.clone();
+    let state_end = state.clone();
+    let sub_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sub_id_start = sub_id.clone();
+    let sub_id_end = sub_id;
+    server
+        .serve_with_hooks(
+            transport,
+            move |write_tx| {
+                let id = state_start.register_rpc_event_subscriber(write_tx);
+                sub_id_start.store(id, Ordering::SeqCst);
+            },
+            move || {
+                let id = sub_id_end.load(Ordering::SeqCst);
+                if id != 0 {
+                    state_end.unregister_rpc_event_subscriber(id);
+                }
+            },
+        )
+        .await;
+}
+
+fn permission_mode_from_config(config: &AppConfig) -> PermissionMode {
+    config
+        .effective_permission_mode()
+        .parse()
+        .unwrap_or(PermissionMode::Manual)
+}
+
+fn http_session_json(session: &Session) -> serde_json::Value {
+    let meta = session.services.metadata.read();
+    let usage = session.usage.snapshot();
+    serde_json::json!({
+        "session_id": session.id,
+        "title": session.title,
+        "workspace": session.working_dir.display().to_string(),
+        "working_dir": session.working_dir.display().to_string(),
+        "forked_from": meta.forked_from.clone(),
+        "parent_id": meta.forked_from,
+        "permission_mode": session.get_permission_mode().to_string(),
+        "plan_mode": session.plan_mode,
+        "model": session.get_model_alias(),
+        "messages": session.messages,
+        "todos": session.todo_items(),
+        "usage": {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_tokens": usage.cache_creation_input_tokens,
+            "cache_read_tokens": usage.cache_read_input_tokens,
+            "input_includes_cache": session.usage.input_includes_cache(),
+            "steps": usage.steps,
+            "turns": usage.turns,
+            "context": session.usage.last_context,
+        },
+    })
+}
+
+fn persist_session_messages(db: &TranscriptDb, session: &mut Session) -> anyhow::Result<()> {
+    // Delegate to the shared core implementation so per-step (persist_step)
+    // and turn-end persistence stay in lockstep — no duplicated
+    // rewrite/append/auto-title logic to drift apart.
+    kkagent_core::transcript::persist_session_delta(db, session)
+}
+
+fn serialize_transcript_messages(
+    messages: &[ChatMessage],
+) -> anyhow::Result<Vec<(String, String)>> {
+    messages
+        .iter()
+        .map(|message| {
+            Ok((
+                message.role.clone(),
+                kkagent_core::transcript::encode_transcript_content(message)?,
+            ))
+        })
+        .collect()
+}
+
+fn messages_from_records(records: &[kkagent_core::transcript::MessageRecord]) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = records
+        .iter()
+        .filter_map(|r| {
+            kkagent_core::transcript::message_from_transcript(r.role.clone(), &r.content_json)
+        })
+        .collect();
+    repair_orphan_tool_uses(&mut messages);
+    messages
+}
+
+/// Synthesize error tool_results for tool_use blocks left unanswered by a
+/// crash between per-message persistence points. Providers reject a
+/// tool_use without its matching tool_result, so loading a crashed turn's
+/// transcript must repair the tail before it can be replayed.
+fn repair_orphan_tool_uses(messages: &mut Vec<ChatMessage>) {
+    let Some(last) = messages.last() else {
+        return;
+    };
+    if last.role != "assistant" {
+        return;
+    }
+    // Only an unanswered trailing tool_use needs repair.
+    if !last
+        .content
+        .iter()
+        .any(|block| matches!(block, ChatContent::ToolUse { .. }))
+    {
+        return;
+    }
+
+    // Walk back over trailing tool_result messages collecting answered ids.
+    let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for message in messages[..messages.len() - 1].iter().rev() {
+        if message.role != "user" {
+            break;
+        }
+        let only_results = message
+            .content
+            .iter()
+            .all(|block| matches!(block, ChatContent::ToolResult { .. }));
+        if !only_results {
+            break;
+        }
+        for block in &message.content {
+            if let ChatContent::ToolResult { tool_use_id, .. } = block {
+                answered.insert(tool_use_id.as_str());
+            }
+        }
+    }
+
+    let missing: Vec<(String, String)> = last
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ChatContent::ToolUse { id, name, .. } if !answered.contains(id.as_str()) => {
+                Some((id.clone(), name.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        count = missing.len(),
+        "repairing orphan tool_use blocks from an interrupted turn"
+    );
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: missing
+            .into_iter()
+            .map(|(id, name)| ChatContent::ToolResult {
+                tool_use_id: id,
+                content: format!(
+                    "Tool `{name}` was interrupted by a server restart; no result was recorded."
+                ),
+                is_error: true,
+            })
+            .collect(),
+        tools: None,
+    });
+}
+
+fn http_session_list_item(
+    summary: kkagent_core::session::store::SessionSummary,
+    record: Option<&kkagent_core::transcript::SessionRecord>,
+) -> serde_json::Value {
+    let message_count = record.map(|item| item.message_count).unwrap_or(0);
+    // The transcript auto-title can be committed before the journal summary
+    // is refreshed. Prefer the summary's explicit/custom title, but fall back
+    // to the authoritative transcript record instead of showing a raw ID in
+    // the WebUI sidebar.
+    let title = summary
+        .title
+        .clone()
+        .or_else(|| record.and_then(|item| item.title.clone()));
+    let preview = summary
+        .last_prompt
+        .as_deref()
+        .or(summary.first_prompt.as_deref())
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let updated_at = chrono::DateTime::from_timestamp_millis(summary.updated_at)
+        .map(|time| time.to_rfc3339())
+        .or_else(|| record.map(|item| item.updated_at.clone()));
+    serde_json::json!({
+        "session_id": summary.id,
+        "title": title,
+        "workspace": summary.work_dir,
+        "working_dir": summary.work_dir,
+        "updated_at": updated_at,
+        "preview": preview,
+        "forked_from": summary.forked_from.clone(),
+        "parent_id": summary.forked_from,
+        "message_count": message_count,
+        "empty": message_count == 0,
+    })
+}
+
+fn http_messages_from_records(
+    records: &[kkagent_core::transcript::MessageRecord],
+) -> Vec<serde_json::Value> {
+    // Deliberately raw (no orphan repair): the HTTP view mirrors the on-disk
+    // transcript exactly, timestamps included. LLM-context correctness is
+    // handled by `messages_from_records`, which repairs orphan tool_use.
+    records
+        .iter()
+        .map(|record| {
+            let content: serde_json::Value =
+                serde_json::from_str(&record.content_json).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "role": record.role,
+                "content": content,
+                "created_at": record.created_at,
+            })
+        })
+        .collect()
+}
+
+async fn http_rpc(
+    state: &Arc<ServerState>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (tx, _rx) = mpsc::channel(16);
+    handle_rpc_call(state.clone(), method, Some(params), tx)
+        .await
+        .map_err(|(_, message)| message)
+}
+
+async fn persist_disabled_extensions(state: &ServerState) -> Result<(), String> {
+    let disabled_skills = state.skills.disabled_names().await;
+    let disabled_mcp_servers: Vec<String> = state
+        .mcp
+        .list_server_status()
+        .await
+        .into_iter()
+        .filter(|s| !s.enabled)
+        .map(|s| s.name)
+        .collect();
+    DisabledState {
+        disabled_skills,
+        disabled_mcp_servers,
+    }
+    .save()
+    .map_err(|e| e.to_string())
+}
+
+/// Shared turn spawn used by `session.prompt` and `skills.activate`.
+///
+/// Returns immediately after scheduling the turn. MCP discovery (which can take
+/// seconds) runs inside the turn task so the RPC / TUI main loop stay responsive.
+async fn spawn_session_agent_turn(
+    state: Arc<ServerState>,
+    session_id: String,
+    turn_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), (i32, String)> {
+    let steer_mailbox = state
+        .steer_mailboxes
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+    let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(256);
+
+    let event_state = state.clone();
+    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let wire_dir = home_dir.join(".kkagent").join("sessions").join(&session_id);
+    let wire = kkagent_wire::WireJournal::open(&wire_dir);
+    let telemetry_fwd = state.telemetry.clone();
+    tokio::spawn(async move {
+        let _ = wire.ensure_metadata().await;
+        while let Some(evt) = agent_event_rx.recv().await {
+            let data = serde_json::to_value(&evt).unwrap_or_default();
+            if !matches!(
+                &evt,
+                AgentEvent::Heartbeat { .. } | AgentEvent::LlmRetry { .. }
+            ) {
+                let evt_type = data
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("agent.event")
+                    .to_string();
+                let record = kkagent_wire::op_to_wire_record(
+                    &evt_type,
+                    data.clone(),
+                    chrono::Utc::now().timestamp_millis(),
+                );
+                let _ = wire.append(&record).await;
+                match &evt {
+                    AgentEvent::TurnStart { .. } => {
+                        telemetry_fwd
+                            .track_json("turn_start", serde_json::json!({}))
+                            .await;
+                    }
+                    AgentEvent::TurnEnd { .. } => {
+                        telemetry_fwd
+                            .track_json("turn_end", serde_json::json!({}))
+                            .await;
+                    }
+                    AgentEvent::SubagentSpawned { subagent_id, .. } => {
+                        telemetry_fwd
+                            .track_json(
+                                "subagent_created",
+                                serde_json::json!({"subagent_id": subagent_id}),
+                            )
+                            .await;
+                    }
+                    _ => {}
+                }
+            }
+            event_state.note_agent_event_for_resume(&evt).await;
+            // Archive completion-judge verdicts per session (capped, oldest evicted).
+            if let AgentEvent::GoalJudge {
+                session_id: judge_sid,
+                verdict,
+                gaps,
+                summary,
+                model,
+            } = &evt
+            {
+                const MAX_JUDGE_RECORDS: usize = 50;
+                let mut records = event_state.goal_judge_records.lock().await;
+                let entry = records.entry(judge_sid.clone()).or_default();
+                entry.push(kkagent_core::goal_judge::GoalJudgeRecord {
+                    verdict: verdict.clone(),
+                    gaps: gaps.clone(),
+                    summary: summary.clone(),
+                    model: model.clone(),
+                    usage: None,
+                });
+                let excess = entry.len().saturating_sub(MAX_JUDGE_RECORDS);
+                entry.drain(..excess);
+            }
+            // Fan-out to every attached TUI. Never stop draining when a client
+            // disconnects — otherwise detach/reattach leaves Thinking stuck and
+            // interrupt status updates never reach the new connection.
+            event_state.publish_rpc_event(Frame::Event {
+                event: "agent".into(),
+                scope: None,
+                data,
+            });
+        }
+    });
+
+    let model_alias = {
+        let aliases = state.model_aliases.lock().await;
+        aliases
+            .get(&session_id)
+            .map(|a| a.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .filter(|a| !a.is_empty())
+            .or_else(|| state.config().default_model_alias().map(|s| s.to_string()))
+            .ok_or_else(|| (-32000, "No default_model in config".into()))?
+    };
+    if state.config().resolve_model(&model_alias).is_none() {
+        return Err((-32000, format!("Model '{model_alias}' not found")));
+    }
+
+    let permission_rules = state
+        .config()
+        .permission
+        .as_ref()
+        .map(|p| p.rules.clone())
+        .unwrap_or_default();
+    let shared_mode = {
+        let modes = state.permission_modes.lock().await;
+        if let Some(arc) = modes.get(&session_id) {
+            arc.clone()
+        } else {
+            let sessions = state.sessions.lock().await;
+            sessions
+                .get(&session_id)
+                .map(|s| s.permission_mode.clone())
+                .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?
+        }
+    };
+
+    let active_btw = {
+        let sessions = state.sessions.lock().await;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+        ActiveBtwSession::from_session(session)
+    };
+    state
+        .active_btw_sessions
+        .lock()
+        .await
+        .insert(session_id.clone(), active_btw.clone());
+
+    let state_clone = state.clone();
+    let sid = session_id.clone();
+    steer_mailbox.start_turn();
+    tokio::spawn(async move {
+        let _turn_permit = turn_permit;
+
+        // Surface MCP wait to the TUI without blocking the prompt RPC.
+        if !state_clone.mcp.is_initialized() && state_clone.mcp.configured_count() > 0 {
+            let _ = agent_event_tx
+                .send(AgentEvent::StatusUpdate {
+                    session_id: sid.clone(),
+                    status: SessionStatus::Thinking,
+                })
+                .await;
+            let snap = state_clone.mcp.status_snapshot().await;
+            state_clone.publish_rpc_event(Frame::Event {
+                event: "mcp.status".into(),
+                scope: None,
+                data: mcp_status_json(&snap),
+            });
+
+            let cancel = {
+                let flags = state_clone.interrupt_flags.lock().await;
+                flags.get(&sid).cloned()
+            };
+            let ready = if let Some(flag) = cancel {
+                state_clone
+                    .mcp
+                    .wait_until_initialized_or_cancel(flag.as_ref())
+                    .await
+            } else {
+                state_clone.mcp.wait_until_initialized().await;
+                true
+            };
+
+            if !ready {
+                let _ = agent_event_tx
+                    .send(AgentEvent::Error {
+                        session_id: sid.clone(),
+                        message: "Interrupted while waiting for MCP".into(),
+                    })
+                    .await;
+                let _ = agent_event_tx
+                    .send(AgentEvent::StatusUpdate {
+                        session_id: sid.clone(),
+                        status: SessionStatus::Idle,
+                    })
+                    .await;
+                let _ = agent_event_tx
+                    .send(AgentEvent::TurnEnd {
+                        session_id: sid.clone(),
+                    })
+                    .await;
+                // The mailbox was opened before MCP discovery so steering can
+                // be buffered during startup. Close it on this early-abort path
+                // and persist anything accepted before the interrupt won.
+                let session = state_clone.sessions.lock().await.remove(&sid);
+                if let Some(mut session) = session {
+                    if let Err(error) = session.close_and_apply_steers() {
+                        tracing::error!("Failed to preserve pending steer input: {error}");
+                    }
+                    {
+                        let db = state_clone.transcript.lock().await;
+                        if let Err(error) = persist_session_messages(&db, &mut session) {
+                            tracing::error!("Failed to persist interrupted turn: {error}");
+                        }
+                    }
+                    // Route through checkin so in_flight_views and the
+                    // reconnect tail are cleaned up consistently.
+                    state_clone.checkin_session(&sid, session).await;
+                } else {
+                    let dropped = steer_mailbox.close_and_drain().len();
+                    if dropped > 0 {
+                        tracing::error!(
+                            "Could not preserve {dropped} steer message(s): session {sid} disappeared"
+                        );
+                    }
+                }
+                state_clone.active_btw_sessions.lock().await.remove(&sid);
+                return;
+            }
+
+            let snap = state_clone.mcp.status_snapshot().await;
+            state_clone.publish_rpc_event(Frame::Event {
+                event: "mcp.status".into(),
+                scope: None,
+                data: mcp_status_json(&snap),
+            });
+        }
+
+        let todos = {
+            let sessions = state_clone.sessions.lock().await;
+            sessions
+                .get(&sid)
+                .map(Session::todo_items)
+                .unwrap_or_default()
+        };
+        let tools =
+            build_turn_tool_registry(&state_clone, agent_event_tx.clone(), todos, &sid).await;
+        let permission = PermissionChain::with_shared_mode(shared_mode, permission_rules);
+        let agent_loop = Arc::new(
+            AgentLoop::new(
+                state_clone.config(),
+                Arc::new(tools),
+                Arc::new(Mutex::new(permission)),
+                agent_event_tx.clone(),
+                state_clone.abort_registry.clone(),
+            )
+            .with_hooks(state_clone.hooks.clone())
+            .with_goal_manager(state_clone.goal_for(&sid).await)
+            .with_tool_result_store(state_clone.tool_result_store.clone())
+            .with_transcript_db(state_clone.transcript.lock().await.clone()),
+        );
+
+        let mut session = match state_clone.checkout_session(&sid).await {
+            Some(s) => s,
+            None => {
+                tracing::error!("Session {} disappeared before turn", sid);
+                let dropped = steer_mailbox.close_and_drain().len();
+                if dropped > 0 {
+                    tracing::error!(
+                        "Could not preserve {dropped} steer message(s): session {sid} disappeared"
+                    );
+                }
+                state_clone.active_btw_sessions.lock().await.remove(&sid);
+                return;
+            }
+        };
+        if session.is_interrupted() {
+            let _ = agent_event_tx
+                .send(AgentEvent::Error {
+                    session_id: sid.clone(),
+                    message: "Interrupted".into(),
+                })
+                .await;
+            let _ = agent_event_tx
+                .send(AgentEvent::StatusUpdate {
+                    session_id: sid.clone(),
+                    status: SessionStatus::Idle,
+                })
+                .await;
+            let _ = agent_event_tx
+                .send(AgentEvent::TurnEnd {
+                    session_id: sid.clone(),
+                })
+                .await;
+            if let Err(error) = session.close_and_apply_steers() {
+                tracing::error!("Failed to preserve pending steer input: {error}");
+            }
+            {
+                let db = state_clone.transcript.lock().await;
+                if let Err(error) = persist_session_messages(&db, &mut session) {
+                    tracing::error!("Failed to persist interrupted turn: {error}");
+                }
+            }
+            if let Err(error) = session.sync_requested_plan_mode() {
+                tracing::error!("Failed to persist requested plan mode: {error}");
+            }
+            state_clone.checkin_session(&sid, session).await;
+            state_clone.active_btw_sessions.lock().await.remove(&sid);
+            return;
+        }
+
+        let mut run_turn_count = 0usize;
+        loop {
+            if let Err(e) = agent_loop.run_turn(&mut session).await {
+                tracing::error!("Agent loop error: {}", e);
+                let _ = agent_event_tx
+                    .send(AgentEvent::Error {
+                        session_id: sid.clone(),
+                        message: e.to_string(),
+                    })
+                    .await;
+            }
+            run_turn_count += 1;
+            // Steers that arrived while the turn was finishing must stay part
+            // of this turn — a steer is injected after tool execution, never
+            // silently demoted to a new turn. Two teardown races are covered:
+            //   1. The steer already landed in the mailbox → drain + rerun.
+            //   2. The steer is in flight (mailbox closed, permit still held):
+            //      its rejected push knocked; reopen admission, let the client
+            //      retry loop land it, then drain + rerun. Turns without a
+            //      knock finish immediately — no teardown delay.
+            // A hard cap guards against pathological client spam.
+            let mut steers_applied = session
+                .close_and_apply_steers()
+                .map_err(|error| {
+                    tracing::error!("Failed to preserve pending steer input: {error}");
+                })
+                .unwrap_or(0);
+            if steers_applied == 0 && run_turn_count < 32 {
+                let mailbox = state_clone.steer_mailboxes.lock().await.get(&sid).cloned();
+                if let Some(mailbox) = mailbox {
+                    if mailbox.take_knock() {
+                        // An in-flight steer was rejected while the mailbox was
+                        // closed. Reopen admission so the client's retry loop
+                        // (still running: the permit is held) lands it…
+                        mailbox.start_turn();
+                        // …and wait briefly for the push to arrive.
+                        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+                        while mailbox.is_empty() && std::time::Instant::now() < deadline {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        steers_applied = session
+                            .close_and_apply_steers()
+                            .map_err(|error| {
+                                tracing::error!("Failed to preserve pending steer input: {error}");
+                            })
+                            .unwrap_or(0);
+                    }
+                }
+            }
+            if steers_applied > 0 && run_turn_count < 32 {
+                tracing::info!(
+                    "Continuing turn for {steers_applied} steer(s) that arrived during teardown"
+                );
+                continue;
+            }
+            break;
+        }
+
+        {
+            let db = state_clone.transcript.lock().await;
+            if let Err(error) = persist_session_messages(&db, &mut session) {
+                tracing::error!("Failed to persist completed turn: {error}");
+                let _ = agent_event_tx.try_send(AgentEvent::Error {
+                    session_id: sid.clone(),
+                    message: format!("turn persistence failed: {error}"),
+                });
+            }
+        }
+
+        if let Err(error) = session.sync_requested_plan_mode() {
+            tracing::error!("Failed to persist requested plan mode: {error}");
+            let _ = agent_event_tx.try_send(AgentEvent::Error {
+                session_id: sid.clone(),
+                message: format!("plan mode persistence failed: {error}"),
+            });
+        }
+        state_clone.checkin_session(&sid, session).await;
+        state_clone.active_btw_sessions.lock().await.remove(&sid);
+    });
+
+    Ok(())
+}
+
+fn mcp_status_json(snap: &kkagent_mcp::McpStatusSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "configured": snap.configured,
+        "initialized": snap.initialized,
+        "connected": snap.connected,
+        "enabled": snap.enabled,
+        "total": snap.total,
+        "tool_count": snap.tool_count,
+        "servers": snap.servers.iter().map(|s| serde_json::json!({
+            "name": s.name,
+            "enabled": s.enabled,
+            "connected": s.connected,
+            "transport": s.transport,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn btw_retry_delay(
+    attempt: u32,
+    server_retry_after: Option<Duration>,
+    rate_limited: bool,
+    rate_limit_base: Duration,
+) -> Duration {
+    server_retry_after.unwrap_or_else(|| {
+        let exponent = attempt.saturating_sub(1).min(5);
+        if rate_limited {
+            rate_limit_base.saturating_mul(1_u32 << exponent)
+        } else {
+            Duration::from_millis(200_u64.saturating_mul(1_u64 << exponent))
+        }
+    })
+}
+
+struct BtwRetryNotice<'a> {
+    session_id: &'a str,
+    agent_id: &'a str,
+    retry_number: u32,
+    reason: &'a str,
+    delay: Duration,
+    remaining: Duration,
+    initial: bool,
+}
+
+async fn send_btw_retry_notice(publish: &impl Fn(Frame), notice: BtwRetryNotice<'_>) {
+    let ceil_seconds = |duration: Duration| {
+        let milliseconds = duration.as_millis();
+        u64::try_from(milliseconds.saturating_add(999) / 1_000).unwrap_or(u64::MAX)
+    };
+    publish(Frame::Event {
+        event: "agent".into(),
+        scope: None,
+        data: serde_json::to_value(AgentEvent::BtwRetry {
+            session_id: notice.session_id.to_string(),
+            agent_id: notice.agent_id.to_string(),
+            retry_number: notice.retry_number,
+            reason: notice.reason.to_string(),
+            wait_seconds: ceil_seconds(notice.delay),
+            remaining_seconds: ceil_seconds(notice.remaining),
+            initial: notice.initial,
+        })
+        .unwrap_or_default(),
+    });
+}
+
+async fn wait_for_btw_retry(
+    publish: &impl Fn(Frame),
+    session_id: &str,
+    agent_id: &str,
+    retry_number: u32,
+    reason: &str,
+    delay: Duration,
+    cancel: &AtomicBool,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + delay;
+    let mut displayed_seconds = u64::MAX;
+    let mut initial = true;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining_seconds =
+            u64::try_from(remaining.as_millis().saturating_add(999) / 1_000).unwrap_or(u64::MAX);
+        if initial || remaining_seconds != displayed_seconds {
+            displayed_seconds = remaining_seconds;
+            send_btw_retry_notice(
+                publish,
+                BtwRetryNotice {
+                    session_id,
+                    agent_id,
+                    retry_number,
+                    reason,
+                    delay,
+                    remaining,
+                    initial,
+                },
+            )
+            .await;
+            initial = false;
+        }
+        if remaining.is_zero() {
+            return true;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+    }
+}
+
+fn is_visible_user_turn_start(message: &ChatMessage) -> bool {
+    message.role == "user"
+        && message.content.iter().any(|content| match content {
+            ChatContent::Text { text } => {
+                !kkagent_protocol::visible_user_text(text).trim().is_empty()
+            }
+            ChatContent::Image { .. } | ChatContent::Video { .. } => true,
+            _ => false,
+        })
+}
+
+fn aligned_message_page_start(messages: &[ChatMessage], desired_start: usize) -> usize {
+    let mut start = desired_start.min(messages.len());
+    while start > 0
+        && messages
+            .get(start)
+            .is_some_and(|message| !is_visible_user_turn_start(message))
+    {
+        start -= 1;
+    }
+    start
+}
+
+/// Returns a recent display slice aligned to a complete user turn.
+fn slice_recent_messages(
+    messages: &[ChatMessage],
+    display_limit: Option<usize>,
+) -> (Vec<ChatMessage>, usize, bool) {
+    let total = messages.len();
+    let Some(limit) = display_limit else {
+        return (messages.to_vec(), 0, false);
+    };
+    if total <= limit {
+        return (messages.to_vec(), 0, false);
+    }
+    let start = aligned_message_page_start(messages, total - limit);
+    (messages[start..].to_vec(), start, true)
+}
+
+fn reconnect_open_assistant_step(messages: &[ChatMessage]) -> bool {
+    messages.last().is_some_and(|message| {
+        message.role == "assistant"
+            && message
+                .content
+                .last()
+                .is_some_and(|block| matches!(block, ChatContent::ToolUse { .. }))
+    })
+}
+
+fn reconnect_append_tool_call(
+    entry: &mut SessionReconnectUi,
+    tool_call_id: String,
+    tool_name: String,
+    input: serde_json::Value,
+) {
+    let thinking = std::mem::take(&mut entry.thinking_text);
+    let text = std::mem::take(&mut entry.assistant_text);
+
+    if reconnect_open_assistant_step(&entry.partial_messages) {
+        if let Some(last) = entry.partial_messages.last_mut() {
+            if !thinking.is_empty()
+                && !last
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ChatContent::Thinking { .. }))
+            {
+                last.content.insert(0, ChatContent::Thinking { thinking });
+            }
+            if !text.is_empty() {
+                match last
+                    .content
+                    .iter_mut()
+                    .find(|block| matches!(block, ChatContent::Text { .. }))
+                {
+                    Some(ChatContent::Text { text: existing }) => existing.push_str(&text),
+                    _ => last.content.push(ChatContent::Text { text }),
+                }
+            }
+            last.content.push(ChatContent::ToolUse {
+                id: tool_call_id,
+                name: tool_name,
+                input,
+            });
+            return;
+        }
+    }
+
+    let mut content = Vec::new();
+    if !thinking.is_empty() {
+        content.push(ChatContent::Thinking { thinking });
+    }
+    if !text.is_empty() {
+        content.push(ChatContent::Text { text });
+    }
+    content.push(ChatContent::ToolUse {
+        id: tool_call_id,
+        name: tool_name,
+        input,
+    });
+    entry.partial_messages.push(ChatMessage {
+        role: "assistant".into(),
+        content,
+        tools: None,
+    });
+}
+
+fn plan_state_json(plan: kkagent_core::SessionPlanState) -> serde_json::Value {
+    serde_json::json!({
+        "id": plan.id,
+        "path": plan.path,
+        "content": plan.content.unwrap_or_default(),
+    })
+}
+
+fn slice_message_page(
+    messages: &[ChatMessage],
+    before: usize,
+    limit: usize,
+) -> (Vec<ChatMessage>, usize, bool) {
+    let end = before.min(messages.len());
+    let start = aligned_message_page_start(messages, end.saturating_sub(limit));
+    (messages[start..end].to_vec(), start, start > 0)
+}
+
+fn resolve_session_id(db: &TranscriptDb, query: &str) -> Option<String> {
+    if db.get_session(query).ok().flatten().is_some() {
+        return Some(query.to_string());
+    }
+    let sessions = db.list_sessions(50).ok()?;
+    let matches: Vec<_> = sessions
+        .into_iter()
+        .filter(|s| s.session_id.starts_with(query))
+        .collect();
+    if matches.len() == 1 {
+        return Some(matches[0].session_id.clone());
+    }
+    // Disk store fallback — the session exists on disk but not in the transcript
+    // DB (e.g. after a DB migration/reset or created by an older code path).
+    // Backfill the DB record so subsequent message persistence works.
+    if is_safe_session_id(query) {
+        if let Ok(summary) = SessionStore::open_default().get(query) {
+            let working_dir = summary.work_dir.clone();
+            // Prefer an existing title, then the first user prompt, and only
+            // fall back to the session id — never leave "unknown" behind.
+            let title = summary
+                .title
+                .or(summary.first_prompt)
+                .unwrap_or_else(|| query.to_string());
+            if let Err(error) = db.create_session(query, "unknown", &working_dir) {
+                tracing::warn!("backfill create_session({query}) failed: {error:#}");
+            } else if let Err(error) = db.set_title(query, &title) {
+                tracing::warn!("backfill set_title({query}) failed: {error:#}");
+            }
+            return Some(query.to_string());
+        }
+    }
+    None
+}
+
+fn resolve_resume_working_dir(
+    stored_working_dir: &str,
+    requested_workspace: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let requested = requested_workspace
+        .map(std::fs::canonicalize)
+        .transpose()
+        .map_err(|error| format!("invalid current workspace: {error}"))?;
+    let stored = PathBuf::from(stored_working_dir);
+    let candidate = if stored.is_absolute() {
+        stored
+    } else if let Some(root) = requested.as_ref() {
+        root.join(stored)
+    } else {
+        stored
+    };
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "session working directory {} is unavailable: {error}",
+            candidate.display()
+        )
+    })?;
+    if requested.as_ref().is_some_and(|root| root != &resolved) {
+        return Err(format!(
+            "session was created under a different directory: {}. Start ctfer from that directory to resume it",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+async fn reload_server_config_from_disk(
+    state: Arc<ServerState>,
+) -> Result<serde_json::Value, (i32, String)> {
+    let path = state.config_path.clone();
+    let mut next = load_config(Some(&path)).map_err(|error| (-32000, error.to_string()))?;
+    hydrate_provider_oauth(&mut next)
+        .await
+        .map_err(|error| (-32000, error.to_string()))?;
+    let sandbox = kkagent_tools::sandbox::SandboxPolicy::from_app_config(&next)
+        .map_err(|error| (-32000, error.to_string()))?;
+    let model_count = next.models.len();
+    let mcp_server_count = next.mcp_servers.len();
+    let default_model = next.default_model.clone();
+    let disabled_skills = next.disabled_skills.clone();
+    let workspace_trust = next.workspace_trust.clone();
+    let next = Arc::new(next);
+
+    state.replace_config(next);
+    *state
+        .sandbox_policy
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = sandbox;
+    *state
+        .workspace_trust
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = workspace_trust;
+    state.skills.set_disabled(disabled_skills).await;
+
+    tracing::info!(
+        path = %path.display(),
+        models = model_count,
+        "Config reloaded from disk"
+    );
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "models": model_count,
+        "mcp_servers": mcp_server_count,
+        "default_model": default_model,
+        "mcp_hooks_restart_hint": true,
+    }))
+}
+
+async fn handle_rpc_call(
+    state: Arc<ServerState>,
+    method: &str,
+    params: Option<serde_json::Value>,
+    rpc_event_tx: mpsc::Sender<Frame>,
+) -> Result<serde_json::Value, (i32, String)> {
+    match method {
+        "runtime.status" => {
+            let sandbox = state.sandbox_snapshot();
+            Ok(serde_json::json!({
+                "sandbox": {
+                    "mode": sandbox.mode_name(),
+                    "network": sandbox.network,
+                },
+                "alive": true,
+                "active_turns": state.turn_locks.active_count().await,
+                "client_count": state.client_count(),
+                "uptime_secs": state.started_at.elapsed().as_secs(),
+                "pid": std::process::id(),
+            }))
+        }
+        "runtime.http.start" => {
+            let value =
+                params.ok_or_else(|| (-32602, "Missing runtime.http.start params".to_string()))?;
+            let addr = value
+                .get("addr")
+                .and_then(serde_json::Value::as_str)
+                .filter(|addr| !addr.trim().is_empty())
+                .ok_or_else(|| (-32602, "Missing or empty 'addr'".to_string()))?
+                .to_string();
+            let provided_token = value
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .or_else(|| std::env::var("KKAGENT_HTTP_TOKEN").ok())
+                .filter(|token| !token.trim().is_empty());
+            if provided_token.is_none() {
+                let resolved = tokio::net::lookup_host(&addr).await;
+                let needs_token = match resolved {
+                    Ok(sockets) => sockets.into_iter().any(|socket| !socket.ip().is_loopback()),
+                    Err(_) => {
+                        // Unresolvable addresses are rejected by bind_http anyway;
+                        // require a token to stay conservative.
+                        true
+                    }
+                };
+                if needs_token {
+                    return Err((
+                        -32000,
+                        "non-loopback HTTP listen address requires a token".into(),
+                    ));
+                }
+            }
+            // Spec: no token provided → load or generate a stable high-entropy one and return it.
+            let token = provided_token.or_else(|| Some(load_or_generate_http_token()));
+            let backend = Arc::new(AgentHttpBackend {
+                state: state.clone(),
+            });
+            let info = match state.http_runtime.start(backend, &addr, token).await {
+                Ok(Some(info)) => info,
+                Ok(None) => {
+                    return Err((-32000, "HTTP server is already running".into()));
+                }
+                Err(error) => {
+                    return Err((-32000, format!("failed to start HTTP server: {error}")))
+                }
+            };
+            // Same recovery semantics as `--http` startup.
+            recover_durable_turns(Arc::new(AgentHttpBackend {
+                state: state.clone(),
+            }))
+            .await;
+            Ok(serde_json::json!({
+                "address": info.address,
+                "token": info.token.unwrap_or_default(),
+            }))
+        }
+        "runtime.http.stop" => match state.http_runtime.stop().await {
+            Ok(address) => Ok(serde_json::json!({ "stopped": true, "address": address })),
+            Err(message) => Err((-32000, message)),
+        },
+        "runtime.http.status" => Ok(state.http_runtime.status().await),
+        "runtime.has_active_turns" => {
+            let sessions = state.turn_locks.active_session_ids().await;
+            Ok(serde_json::json!({
+                "active": !sessions.is_empty(),
+                "sessions": sessions,
+            }))
+        }
+        "runtime.shutdown" => {
+            if state.has_active_turns().await {
+                return Err((
+                    -32000,
+                    "server has active agent turn(s); refuse to stop".into(),
+                ));
+            }
+            state.request_shutdown();
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "config.reload" => reload_server_config_from_disk(state).await,
+        "usage.history" => {
+            let days = params
+                .as_ref()
+                .and_then(|p| p.get("days"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(30)
+                .clamp(1, 365);
+            // Optional live per-session snapshot (rebuilt from UsageUpdate /
+            // SubagentCompleted events server-side) so a reattached TUI can
+            // restore its /usage totals without replaying the stream.
+            let session = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            // The sink lives in this (server) process; fall back to a direct
+            // read of the shared DB for embedded/in-memory edge cases.
+            let store = kkagent_core::usage_store::global_snapshot().or_else(|| {
+                let path = kkagent_config::default_config_dir().join("transcripts.db");
+                kkagent_core::open_shared_sqlite(&path)
+                    .ok()
+                    .and_then(|shared| kkagent_core::UsageStore::from_shared(shared).ok())
+            });
+            let Some(store) = store else {
+                return Ok(serde_json::json!({
+                    "days": days,
+                    "available": false,
+                    "by_model": [],
+                    "by_location": [],
+                    "by_day": [],
+                }));
+            };
+            let mut response = serde_json::json!({
+                "days": days,
+                "available": true,
+                "by_model": store.totals_by_model(days).unwrap_or_default(),
+                "by_location": store.totals_by_location(days).unwrap_or_default(),
+                "by_day": store.totals_by_day(days).unwrap_or_default(),
+            });
+            if let Some(session_id) = session {
+                let snapshot = state.session_usage.lock().await.get(&session_id).cloned();
+                response["session"] = match snapshot {
+                    Some(entry) => serde_json::to_value(entry).unwrap_or_default(),
+                    None => serde_json::Value::Null,
+                };
+            }
+            Ok(response)
+        }
+        "workspace.trust" => {
+            let value = params.ok_or_else(|| (-32602, "Missing workspace trust".to_string()))?;
+            let trust: kkagent_config::WorkspaceTrust = serde_json::from_value(value)
+                .map_err(|error| (-32602, format!("Invalid workspace trust: {error}")))?;
+            let workspace = trust.workspace.clone();
+            state
+                .apply_workspace_trust(trust)
+                .map_err(|error| (-32602, error.to_string()))?;
+            Ok(serde_json::json!({"ok": true, "workspace": workspace}))
+        }
+        "sessions.create" => {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let requested_workspace = params
+                .as_ref()
+                .and_then(|p| p.get("workspace"))
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| (-32602, "Missing workspace".to_string()))?
+                .to_string();
+            let workspace = std::fs::canonicalize(&requested_workspace).map_err(|error| {
+                (
+                    -32602,
+                    format!("Invalid workspace {requested_workspace}: {error}"),
+                )
+            })?;
+            let perm_mode: PermissionMode = params
+                .as_ref()
+                .and_then(|p| p.get("permission_mode"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_else(|| {
+                    state
+                        .config()
+                        .effective_permission_mode()
+                        .parse()
+                        .unwrap_or_default()
+                });
+
+            let model_alias = state
+                .config()
+                .default_model_alias()
+                .unwrap_or("default")
+                .to_string();
+
+            let mut session = Session::new(
+                session_id.clone(),
+                workspace.clone(),
+                perm_mode,
+                model_alias.clone(),
+            );
+            if !state.workspace_is_trusted(&session.working_dir) {
+                return Err((
+                    -32000,
+                    format!(
+                        "Workspace {} is not in trusted_workspaces",
+                        session.working_dir.display()
+                    ),
+                ));
+            }
+            initialize_session_context(&state, &mut session).await;
+
+            {
+                let db = state.transcript.lock().await;
+                db.create_session(&session_id, &model_alias, &workspace.to_string_lossy())
+                    .map_err(|error| (-32000, error.to_string()))?;
+            }
+
+            state
+                .interrupt_flags
+                .lock()
+                .await
+                .insert(session_id.clone(), session.interrupted.clone());
+            state
+                .model_aliases
+                .lock()
+                .await
+                .insert(session_id.clone(), session.model_alias.clone());
+            state
+                .fallback_models
+                .lock()
+                .await
+                .insert(session_id.clone(), session.fallback_model.clone());
+            state
+                .permission_modes
+                .lock()
+                .await
+                .insert(session_id.clone(), session.permission_mode.clone());
+            state
+                .plan_mode_requests
+                .lock()
+                .await
+                .insert(session_id.clone(), session.plan_mode_requested.clone());
+            state
+                .approval_txs
+                .lock()
+                .await
+                .insert(session_id.clone(), session.approval_tx.clone());
+            state
+                .question_txs
+                .lock()
+                .await
+                .insert(session_id.clone(), session.question_tx.clone());
+            state
+                .steer_mailboxes
+                .lock()
+                .await
+                .insert(session_id.clone(), session.steer_mailbox.clone());
+            session.services.on_created().await;
+            let session_dir = session.session_dir().display().to_string();
+            state
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), session);
+            fire_session_hook(
+                &state,
+                kkagent_mcp::HookEvent::SessionStart,
+                &session_id,
+                &workspace,
+            )
+            .await;
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "session_dir": session_dir,
+                "model": model_alias,
+            }))
+        }
+        "sessions.search" => {
+            let query = params
+                .as_ref()
+                .and_then(|p| p.get("query").or_else(|| p.get("q")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let limit = params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+            let title = params
+                .as_ref()
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str());
+            let tool_name = params
+                .as_ref()
+                .and_then(|p| p.get("tool_name").or_else(|| p.get("tool")))
+                .and_then(|v| v.as_str());
+            let since = params
+                .as_ref()
+                .and_then(|p| p.get("since"))
+                .and_then(|v| v.as_str());
+            let until = params
+                .as_ref()
+                .and_then(|p| p.get("until"))
+                .and_then(|v| v.as_str());
+            let db = state.transcript.lock().await;
+            let hits = db
+                .search_messages(&query, limit, title, tool_name, since, until)
+                .map_err(|e| (-32000, e.to_string()))?;
+            Ok(serde_json::json!({"query": query, "hits": hits, "source": "fts"}))
+        }
+        "sessions.timeline" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let db = state.transcript.lock().await;
+            let session = db
+                .get_session(session_id)
+                .map_err(|e| (-32000, e.to_string()))?
+                .ok_or_else(|| (-32000, format!("session not found: {session_id}")))?;
+            let messages = db
+                .load_messages(session_id)
+                .map_err(|e| (-32000, e.to_string()))?;
+            let events: Vec<serde_json::Value> = messages
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "role": m.role,
+                        "created_at": m.created_at,
+                        "token_count": m.token_count,
+                        "preview": m.content_json.chars().take(200).collect::<String>(),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "session": {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "model": session.model,
+                    "working_dir": session.working_dir,
+                    "created_at": session.created_at,
+                    "updated_at": session.updated_at,
+                    "message_count": session.message_count,
+                },
+                "events": events,
+                "format": "timeline/v1",
+            }))
+        }
+        "sessions.list" => {
+            let limit = params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+            let include_archived = params
+                .as_ref()
+                .and_then(|p| p.get("include_archived"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Prefer disk session store (kimi-aligned); fall back to transcript DB.
+            if let Ok(summaries) = state.disk_session_summaries(include_archived, limit).await {
+                if !summaries.is_empty() {
+                    let db = state.transcript.lock().await;
+                    let session_ids: Vec<String> =
+                        summaries.iter().map(|summary| summary.id.clone()).collect();
+                    let records = db.sessions_by_ids(&session_ids).unwrap_or_default();
+                    let list: Vec<_> = summaries
+                        .into_iter()
+                        .map(|s| {
+                            let message_count = records
+                                .get(&s.id)
+                                .map(|record| record.message_count)
+                                .unwrap_or(0);
+                            let empty = message_count == 0
+                                && s.first_prompt
+                                    .as_ref()
+                                    .map(|p| {
+                                        p.trim().is_empty()
+                                            || kkagent_protocol::is_harness_only_user_text(p)
+                                    })
+                                    .unwrap_or(true)
+                                && s.last_prompt
+                                    .as_ref()
+                                    .map(|p| {
+                                        p.trim().is_empty()
+                                            || kkagent_protocol::is_harness_only_user_text(p)
+                                    })
+                                    .unwrap_or(true);
+                            serde_json::json!({
+                                "session_id": s.id,
+                                "title": s.title,
+                                "is_custom_title": s.is_custom_title,
+                                "working_dir": s.work_dir,
+                                "session_dir": s.session_dir,
+                                "archived": s.archived,
+                                "last_prompt": s.last_prompt,
+                                "first_prompt": s.first_prompt,
+                                "created_at": s.created_at,
+                                "updated_at": s.updated_at,
+                                "forked_from": s.forked_from,
+                                "message_count": message_count,
+                                "empty": empty,
+                            })
+                        })
+                        .collect();
+                    return Ok(serde_json::json!({"sessions": list}));
+                }
+            }
+            let db = state.transcript.lock().await;
+            let sessions = db
+                .list_sessions(limit)
+                .map_err(|e| (-32000, e.to_string()))?;
+            let list: Vec<_> = sessions
+                .into_iter()
+                .map(|s| {
+                    let empty = s.message_count == 0;
+                    let first_prompt = db.load_messages(&s.session_id).ok().and_then(|records| {
+                        let texts: Vec<String> = records
+                            .into_iter()
+                            .filter(|r| r.role == "user")
+                            .filter_map(|r| {
+                                let content: Vec<ChatContent> =
+                                    serde_json::from_str(&r.content_json).ok()?;
+                                content.into_iter().find_map(|c| match c {
+                                    ChatContent::Text { text } => Some(text),
+                                    _ => None,
+                                })
+                            })
+                            .collect();
+                        kkagent_protocol::first_real_user_text(texts.iter().map(String::as_str))
+                    });
+                    serde_json::json!({
+                        "session_id": s.session_id,
+                        "title": s.title,
+                        "model": s.model,
+                        "working_dir": s.working_dir,
+                        "created_at": s.created_at,
+                        "updated_at": s.updated_at,
+                        "message_count": s.message_count,
+                        "empty": empty,
+                        "first_prompt": first_prompt,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"sessions": list}))
+        }
+        "sessions.fork" => {
+            let source_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let target_id = params
+                .as_ref()
+                .and_then(|p| p.get("target_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let title = params
+                .as_ref()
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str());
+            let turn_index = params
+                .as_ref()
+                .and_then(|p| p.get("turn_index"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let message_limit = params
+                .as_ref()
+                .and_then(|p| p.get("message_limit"))
+                .and_then(|v| v.as_u64())
+                .map(|n| {
+                    usize::try_from(n).map_err(|_| (-32602, "message_limit is too large".into()))
+                })
+                .transpose()?;
+            if turn_index.is_some() && message_limit.is_some() {
+                return Err((
+                    -32602,
+                    "turn_index and message_limit are mutually exclusive".into(),
+                ));
+            }
+            let store = SessionStore::open_default();
+            if store.get(source_id).is_err() {
+                // Index miss: the session may still exist in the transcript DB
+                // (e.g. tombstoned by an over-eager discard, or a DB-only
+                // copy from another machine). Fall back to the DB record and
+                // backfill the disk-store index so fork can proceed.
+                let record = {
+                    let db = state.transcript.lock().await;
+                    db.get_session(source_id)
+                        .map_err(|e| (-32000, e.to_string()))?
+                };
+                if let Some(record) = record {
+                    let work_dir = PathBuf::from(&record.working_dir);
+                    let title = record.title;
+                    store
+                        .backfill(source_id, &work_dir)
+                        .map_err(|e| (-32000, e.to_string()))?;
+                    if let Some(title) = title.as_deref().filter(|t| !t.trim().is_empty()) {
+                        let _ = store.rename(source_id, title);
+                    }
+                }
+            }
+            let summary = match message_limit {
+                Some(limit) => store.fork_with_message_limit(source_id, &target_id, title, limit),
+                None => store.fork(source_id, &target_id, title, turn_index),
+            }
+            .map_err(|e| (-32000, e.to_string()))?;
+            let transcript_result = {
+                let db = state.transcript.lock().await;
+                match message_limit {
+                    Some(limit) => db.fork_session_with_message_limit(
+                        source_id,
+                        &target_id,
+                        summary.title.as_deref(),
+                        limit,
+                    ),
+                    None => {
+                        db.fork_session(source_id, &target_id, summary.title.as_deref(), turn_index)
+                    }
+                }
+            };
+            if let Err(error) = transcript_result {
+                let _ = store.delete(&target_id);
+                return Err((-32000, error.to_string()));
+            }
+            Ok(serde_json::json!({
+                "session_id": summary.id,
+                "session_dir": summary.session_dir,
+                "forked_from": summary.forked_from,
+                "title": summary.title,
+            }))
+        }
+        "sessions.archive" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let archived = params
+                .as_ref()
+                .and_then(|p| p.get("archived"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            SessionStore::open_default()
+                .archive(session_id, archived)
+                .map_err(|e| (-32000, e.to_string()))?;
+            {
+                let db = state.transcript.lock().await;
+                if let Err(error) = db.set_archived(session_id, archived) {
+                    let _ = SessionStore::open_default().archive(session_id, !archived);
+                    return Err((-32000, error.to_string()));
+                }
+            }
+            if let Some(session) = state.sessions.lock().await.get_mut(session_id) {
+                let _ = session.services.metadata.set_archived(archived);
+                if archived {
+                    session.services.on_close(SessionCloseReason::Archive).await;
+                }
+            }
+            Ok(serde_json::json!({"session_id": session_id, "archived": archived}))
+        }
+        "sessions.delete" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let _turn_permit = state
+                .turn_locks
+                .try_acquire(&session_id)
+                .await
+                .map_err(|message| (-32001, message))?;
+            SessionStore::open_default()
+                .delete(&session_id)
+                .map_err(|e| (-32000, e.to_string()))?;
+            remove_session_runtime(&state, &session_id).await;
+            drop(_turn_permit);
+            state.turn_locks.remove(&session_id).await;
+            Ok(serde_json::json!({"session_id": session_id, "deleted": true}))
+        }
+        "sessions.discard" => {
+            // Auto-discard path used by the TUI for "empty" sessions. The
+            // emptiness verdict is authoritative on the server: if the
+            // transcript DB or the on-disk store still holds messages, the
+            // delete is refused instead of silently dropping real history
+            // (previously a fast exit before the transcript finished loading
+            // could tombstone a session that was actually in use).
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let _turn_permit = state
+                .turn_locks
+                .try_acquire(&session_id)
+                .await
+                .map_err(|message| (-32001, message))?;
+            let store = SessionStore::open_default();
+            let store_entry = store.get(&session_id).ok();
+            let db_record = {
+                let db = state.transcript.lock().await;
+                db.get_session(&session_id)
+                    .map_err(|e| (-32000, e.to_string()))?
+            };
+            if store_entry.is_none() && db_record.is_none() {
+                // Nothing on disk nor in the DB: treat as already discarded
+                // so repeated auto-discards (e.g. resume race retries) stay
+                // idempotent instead of surfacing "session not found".
+                drop(_turn_permit);
+                state.turn_locks.remove(&session_id).await;
+                return Ok(serde_json::json!({
+                    "session_id": session_id,
+                    "discarded": true,
+                    "idempotent": true,
+                }));
+            }
+            let db_messages = {
+                let db = state.transcript.lock().await;
+                db.load_messages(&session_id)
+                    .map_err(|e| (-32000, e.to_string()))?
+                    .len()
+            };
+            if db_messages > 0 {
+                drop(_turn_permit);
+                return Err((
+                    -32000,
+                    format!(
+                        "refusing to discard session {session_id}: {db_messages} message(s) in transcript"
+                    ),
+                ));
+            }
+            if let Some(summary) = store_entry.as_ref() {
+                let messages_path = Path::new(&summary.session_dir).join("messages.jsonl");
+                if let Ok(text) = std::fs::read_to_string(&messages_path) {
+                    if text.lines().any(|line| !line.trim().is_empty()) {
+                        drop(_turn_permit);
+                        return Err((
+                            -32000,
+                            format!(
+                                "refusing to discard session {session_id}: non-empty on-disk transcript"
+                            ),
+                        ));
+                    }
+                }
+            }
+            if store_entry.is_some() {
+                store
+                    .delete(&session_id)
+                    .map_err(|e| (-32000, e.to_string()))?;
+            }
+            remove_session_runtime(&state, &session_id).await;
+            drop(_turn_permit);
+            state.turn_locks.remove(&session_id).await;
+            Ok(serde_json::json!({"session_id": session_id, "discarded": true}))
+        }
+        "session.preview" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let limit = params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(12) as usize;
+
+            let (title, model, messages) = {
+                let sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get(&session_id) {
+                    let msgs: Vec<_> = session
+                        .messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == "user" || m.role == "assistant")
+                        .filter_map(|m| {
+                            let text = m
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    ChatContent::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let text = if m.role == "user" {
+                                if kkagent_protocol::is_harness_only_user_text(&text) {
+                                    return None;
+                                }
+                                let visible = kkagent_protocol::visible_user_text(&text);
+                                if visible.is_empty() {
+                                    text
+                                } else {
+                                    visible
+                                }
+                            } else {
+                                text
+                            };
+                            if text.trim().is_empty() {
+                                return None;
+                            }
+                            Some(serde_json::json!({
+                                "role": m.role,
+                                "text": text.chars().take(240).collect::<String>(),
+                            }))
+                        })
+                        .take(limit)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    (session.title.clone(), Some(session.get_model_alias()), msgs)
+                } else {
+                    drop(sessions);
+                    let db = state.transcript.lock().await;
+                    let sid =
+                        resolve_session_id(&db, &session_id).unwrap_or_else(|| session_id.clone());
+                    let record = db.get_session(&sid).map_err(|e| (-32000, e.to_string()))?;
+                    let records = db
+                        .load_messages(&sid)
+                        .map_err(|e| (-32000, e.to_string()))?;
+                    let chat = messages_from_records(&records);
+                    let preview: Vec<_> = chat
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == "user" || m.role == "assistant")
+                        .filter_map(|m| {
+                            let text = m
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    ChatContent::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let text = if m.role == "user" {
+                                if kkagent_protocol::is_harness_only_user_text(&text) {
+                                    return None;
+                                }
+                                let visible = kkagent_protocol::visible_user_text(&text);
+                                if visible.is_empty() {
+                                    text
+                                } else {
+                                    visible
+                                }
+                            } else {
+                                text
+                            };
+                            if text.trim().is_empty() {
+                                return None;
+                            }
+                            Some(serde_json::json!({
+                                "role": m.role,
+                                "text": text.chars().take(240).collect::<String>(),
+                            }))
+                        })
+                        .take(limit)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    (
+                        record.as_ref().and_then(|r| r.title.clone()),
+                        record.as_ref().map(|r| r.model.clone()),
+                        preview,
+                    )
+                }
+            };
+
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "title": title,
+                "model": model,
+                "messages": messages,
+            }))
+        }
+        "sessions.rename" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let title = params
+                .as_ref()
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing title".into()))?;
+            let store = SessionStore::open_default();
+            let old_title = store
+                .get(session_id)
+                .map_err(|error| (-32000, error.to_string()))?
+                .title
+                .unwrap_or_else(|| session_id.to_string());
+            store
+                .rename(session_id, title)
+                .map_err(|e| (-32000, e.to_string()))?;
+            let transcript_result = {
+                let db = state.transcript.lock().await;
+                db.set_title(session_id, title)
+            };
+            if let Err(error) = transcript_result {
+                let _ = store.rename(session_id, &old_title);
+                return Err((-32000, error.to_string()));
+            }
+            if let Some(session) = state.sessions.lock().await.get_mut(session_id) {
+                let _ = session.set_title_persisted(title);
+            }
+            Ok(serde_json::json!({"session_id": session_id, "title": title}))
+        }
+        "sessions.export" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let store = SessionStore::open_default();
+            let summary = store.get(session_id).map_err(|e| (-32000, e.to_string()))?;
+            let out = params
+                .as_ref()
+                .and_then(|p| p.get("output_path"))
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(kkagent_core::default_export_dir_name(session_id))
+                });
+            let result = kkagent_core::export_session_directory(&summary, &out)
+                .map_err(|e| (-32000, e.to_string()))?;
+            Ok(serde_json::json!({
+                "output_dir": result.output_dir.display().to_string(),
+                "entries": result.entries,
+                "manifest": result.manifest,
+            }))
+        }
+        "session.resume" => {
+            let query = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            // When set, only the most recent N messages are returned for the TUI
+            // display; the full transcript remains loaded server-side for the agent.
+            let display_limit = params
+                .as_ref()
+                .and_then(|p| p.get("display_limit").or_else(|| p.get("tail")))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let requested_workspace = params
+                .as_ref()
+                .and_then(|p| p.get("workspace"))
+                .and_then(|v| v.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from);
+
+            let (record, messages) = {
+                let db = state.transcript.lock().await;
+                let sid = resolve_session_id(&db, &query)
+                    .ok_or_else(|| (-32602, format!("Session not found: {}", query)))?;
+                let record = db
+                    .get_session(&sid)
+                    .map_err(|e| (-32000, e.to_string()))?
+                    .ok_or_else(|| (-32602, format!("Session not found: {}", sid)))?;
+                let msgs = db
+                    .load_messages(&sid)
+                    .map_err(|e| (-32000, e.to_string()))?;
+                (record, messages_from_records(&msgs))
+            };
+
+            let session_id = record.session_id.clone();
+            let resumed_working_dir =
+                resolve_resume_working_dir(&record.working_dir, requested_workspace.as_deref())
+                    .map_err(|error| (-32602, error))?;
+            let turn_active = state.turn_locks.is_busy(&session_id).await;
+
+            // Prefer the disk-store first_prompt (200-char, stable) for the TUI
+            // tab/picker label; fall back to the DB record title so the field is
+            // always present even when the disk store is unavailable.
+            let first_prompt = SessionStore::open_default()
+                .get(&session_id)
+                .ok()
+                .and_then(|s| s.first_prompt)
+                .or_else(|| record.title.clone());
+
+            // If already in memory, prefer in-memory messages (may be ahead of DB)
+            let in_memory = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&session_id).map(|existing| {
+                    (
+                        existing.messages.clone(),
+                        existing.usage.snapshot(),
+                        existing.usage.last_step.clone(),
+                        existing.usage.last_context.clone(),
+                        plan_state_json(existing.plan_state()),
+                        existing.pending_plan_review(),
+                        existing.todo_items(),
+                        existing.plan_mode,
+                        existing.get_permission_mode(),
+                        existing.get_model_alias(),
+                        existing.working_dir.clone(),
+                    )
+                })
+            };
+            if let Some((
+                messages,
+                usage,
+                last_step_usage,
+                usage_ctx,
+                plan,
+                plan_pending_approval,
+                todos,
+                plan_mode,
+                permission_mode,
+                model,
+                working_dir,
+            )) = in_memory
+            {
+                let pending_approval =
+                    match state.pending_tool_approval_for_session(&session_id).await {
+                        Some(request) => Some(request),
+                        None => plan_pending_approval,
+                    };
+                let pending_question = state.pending_question_for_session(&session_id).await;
+                let status = state
+                    .resume_status_for_session(
+                        &session_id,
+                        turn_active,
+                        pending_approval.is_some(),
+                        pending_question.is_some(),
+                    )
+                    .await;
+                let total = messages.len();
+                let (display, oldest_index, older_available) =
+                    slice_recent_messages(&messages, display_limit);
+                let mut payload = serde_json::json!({
+                    "session_id": session_id,
+                    "messages": display,
+                    "plan_mode": plan_mode,
+                    "plan": plan,
+                    "permission_mode": permission_mode,
+                    "model": model,
+                    "working_dir": working_dir,
+                    "turn_active": turn_active,
+                    "status": status,
+                    "pending_approval": pending_approval,
+                    "pending_approval_resumed": !turn_active,
+                    "pending_question": pending_question,
+                    "todos": todos,
+                    "first_prompt": first_prompt,
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "cache_creation_tokens": usage.cache_creation_input_tokens,
+                        "cache_read_tokens": usage.cache_read_input_tokens,
+                        "steps": usage.steps,
+                        "turns": usage.turns,
+                        "context": usage_ctx,
+                    },
+                    // Most-recent single LLM call usage (not cumulative). Used by the
+                    // TUI to show "current context size" — distinct from `usage`
+                    // above which is the session-running total.
+                    "last_step_usage": {
+                        "input_tokens": last_step_usage.input_tokens,
+                        "output_tokens": last_step_usage.output_tokens,
+                        "cache_creation_tokens": last_step_usage.cache_creation_input_tokens,
+                        "cache_read_tokens": last_step_usage.cache_read_input_tokens,
+                        "input_includes_cache": last_step_usage.input_includes_cache,
+                    },
+                    "history": {
+                        "total": total,
+                        "oldest_index": oldest_index,
+                        "older_available": older_available,
+                    },
+                });
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.extend(state.resume_reconnect_fields(&session_id).await);
+                }
+                return Ok(payload);
+            }
+
+            let configured_perm_mode = state
+                .config()
+                .effective_permission_mode()
+                .parse()
+                .unwrap_or_default();
+            let shared_permission = {
+                let modes = state.permission_modes.lock().await;
+                modes.get(&session_id).cloned()
+            };
+            let perm_mode = shared_permission
+                .map(|mode| *mode.lock().unwrap_or_else(|e| e.into_inner()))
+                .unwrap_or(configured_perm_mode);
+            let resumed_model = {
+                let aliases = state.model_aliases.lock().await;
+                aliases
+                    .get(&session_id)
+                    .map(|alias| alias.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                    .filter(|alias| !alias.is_empty())
+                    .unwrap_or_else(|| {
+                        if record.model.is_empty() {
+                            state
+                                .config()
+                                .default_model_alias()
+                                .unwrap_or("default")
+                                .to_string()
+                        } else {
+                            record.model.clone()
+                        }
+                    })
+            };
+            if turn_active {
+                let plan_state =
+                    kkagent_core::load_persisted_plan_state(&session_id, &resumed_working_dir);
+                let pending_approval =
+                    match state.pending_tool_approval_for_session(&session_id).await {
+                        Some(request) => Some(request),
+                        None => kkagent_core::load_persisted_pending_plan_review(
+                            &session_id,
+                            &resumed_working_dir,
+                        ),
+                    };
+                let pending_question = state.pending_question_for_session(&session_id).await;
+                let todos = kkagent_core::load_persisted_todos(&session_id, &resumed_working_dir);
+                let status = state
+                    .resume_status_for_session(
+                        &session_id,
+                        true,
+                        pending_approval.is_some(),
+                        pending_question.is_some(),
+                    )
+                    .await;
+                let merged_messages = state
+                    .resume_messages_for_active_turn(&session_id, messages.clone())
+                    .await;
+                let total = merged_messages.len();
+                let (display, oldest_index, older_available) =
+                    slice_recent_messages(&merged_messages, display_limit);
+                // Usage is not persisted, so a DB-resumed session starts with
+                // empty totals. Estimate the current context from the full
+                // transcript (not the display slice) so the TUI context
+                // indicator is meaningful right after the switch.
+                let est_tokens =
+                    kkagent_core::token_counting::TokenCounter::estimate_messages(&merged_messages);
+                let mut payload = serde_json::json!({
+                    "session_id": session_id,
+                    "messages": display,
+                    "plan_mode": plan_state.enabled,
+                    "plan": plan_state_json(plan_state),
+                    "permission_mode": perm_mode,
+                    "model": resumed_model,
+                    "working_dir": resumed_working_dir,
+                    "turn_active": true,
+                    "status": status,
+                    "pending_approval": pending_approval,
+                    "pending_approval_resumed": false,
+                    "pending_question": pending_question,
+                    "todos": todos,
+                    "first_prompt": first_prompt,
+                    "usage": {
+                        "input_tokens": est_tokens,
+                        "output_tokens": 0,
+                        "cache_creation_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "steps": 0,
+                        "turns": 0,
+                    },
+                    "last_step_usage": {
+                        "input_tokens": est_tokens,
+                        "output_tokens": 0,
+                    },
+                    "history": {
+                        "total": total,
+                        "oldest_index": oldest_index,
+                        "older_available": older_available,
+                    },
+                });
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.extend(state.resume_reconnect_fields(&session_id).await);
+                }
+                return Ok(payload);
+            }
+            let mut session = Session::resume(
+                session_id.clone(),
+                resumed_working_dir.clone(),
+                perm_mode,
+                resumed_model,
+            );
+            session.set_fallback_model(SessionFallbackModel::from_persisted(
+                record.fallback_model.as_deref(),
+            ));
+            let resumed_model = session.get_model_alias();
+            initialize_session_context(&state, &mut session).await;
+            session.messages = messages.clone();
+            session.persisted_message_count = messages.len();
+            if let Some(ref t) = record.title {
+                let _ = session.set_title_persisted(t.clone());
+            }
+            session.services.create_source = SessionCreateSource::Resume;
+            session.services.on_created().await;
+            let plan_mode = session.plan_mode;
+            let plan = plan_state_json(session.plan_state());
+            let pending_approval = session.pending_plan_review();
+            let pending_question = state.pending_question_for_session(&session_id).await;
+            let todos = session.todo_items();
+            let status = state
+                .resume_status_for_session(
+                    &session_id,
+                    false,
+                    pending_approval.is_some(),
+                    pending_question.is_some(),
+                )
+                .await;
+
+            state
+                .interrupt_flags
+                .lock()
+                .await
+                .insert(session_id.clone(), session.interrupted.clone());
+            state
+                .model_aliases
+                .lock()
+                .await
+                .insert(session_id.clone(), session.model_alias.clone());
+            state
+                .fallback_models
+                .lock()
+                .await
+                .insert(session_id.clone(), session.fallback_model.clone());
+            state
+                .permission_modes
+                .lock()
+                .await
+                .insert(session_id.clone(), session.permission_mode.clone());
+            state
+                .plan_mode_requests
+                .lock()
+                .await
+                .insert(session_id.clone(), session.plan_mode_requested.clone());
+            state
+                .approval_txs
+                .lock()
+                .await
+                .insert(session_id.clone(), session.approval_tx.clone());
+            state
+                .question_txs
+                .lock()
+                .await
+                .insert(session_id.clone(), session.question_tx.clone());
+            state
+                .steer_mailboxes
+                .lock()
+                .await
+                .insert(session_id.clone(), session.steer_mailbox.clone());
+            state
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), session);
+
+            let total = messages.len();
+            let (display, oldest_index, older_available) =
+                slice_recent_messages(&messages, display_limit);
+            // Usage is not persisted; estimate current context from the full
+            // transcript so the TUI indicator reflects reality after resume.
+            let est_tokens =
+                kkagent_core::token_counting::TokenCounter::estimate_messages(&messages);
+            let mut payload = serde_json::json!({
+                "session_id": session_id,
+                "messages": display,
+                "plan_mode": plan_mode,
+                "plan": plan,
+                "permission_mode": perm_mode,
+                "model": resumed_model,
+                "working_dir": resumed_working_dir,
+                "turn_active": false,
+                "status": status,
+                "pending_approval": pending_approval,
+                "pending_approval_resumed": true,
+                "pending_question": pending_question,
+                "todos": todos,
+                "first_prompt": first_prompt,
+                "usage": {
+                    "input_tokens": est_tokens,
+                    "output_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "steps": 0,
+                    "turns": 0,
+                },
+                "last_step_usage": {
+                    "input_tokens": est_tokens,
+                    "output_tokens": 0,
+                },
+                "history": {
+                    "total": total,
+                    "oldest_index": oldest_index,
+                    "older_available": older_available,
+                },
+            });
+            if let Some(obj) = payload.as_object_mut() {
+                obj.extend(state.resume_reconnect_fields(&session_id).await);
+            }
+            Ok(payload)
+        }
+        "session.history" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let before = params
+                .as_ref()
+                .and_then(|p| p.get("before"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let limit = params
+                .as_ref()
+                .and_then(|p| p.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(40) as usize;
+            let limit = limit.clamp(1, 200);
+
+            let in_memory = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(&session_id)
+                    .map(|session| session.messages.clone())
+            };
+            let messages = if let Some(messages) = in_memory {
+                messages
+            } else {
+                let db = state.transcript.lock().await;
+                let records = db
+                    .load_messages(&session_id)
+                    .map_err(|error| (-32000, error.to_string()))?;
+                if records.is_empty() && db.get_session(&session_id).ok().flatten().is_none() {
+                    return Err((-32602, format!("Session not found: {session_id}")));
+                }
+                messages_from_records(&records)
+            };
+            let total = messages.len();
+            let (page, start, older_available) = slice_message_page(&messages, before, limit);
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "messages": page,
+                "history": {
+                    "total": total,
+                    "oldest_index": start,
+                    "older_available": older_available,
+                    "before": before,
+                },
+            }))
+        }
+        "session.turns" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let sessions = state.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+            let turns = kkagent_core::editable_turns(&session.messages)
+                .into_iter()
+                .map(|turn| {
+                    serde_json::json!({
+                        "turn_index": turn.turn_index,
+                        "message_index": turn.message_index,
+                        "text": turn.text,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "turns": turns,
+            }))
+        }
+        "session.prompt" | "session.steer" => {
+            let steer_requested = method == "session.steer";
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let mut text = params
+                .as_ref()
+                .and_then(|p| p.get("text"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing text".into()))?
+                .to_string();
+            let idempotency_key = params
+                .as_ref()
+                .and_then(|p| p.get("idempotency_key"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(ref key) = idempotency_key {
+                let mut seen = state.prompt_idempotency.lock().await;
+                // Drop entries older than 10 minutes.
+                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(600);
+                seen.retain(|_, at| *at > cutoff);
+                let stamp = format!("{session_id}:{key}");
+                if seen.contains_key(&stamp) {
+                    return Ok(serde_json::json!({
+                        "session_id": session_id,
+                        "deduped": true,
+                    }));
+                }
+                seen.insert(stamp, std::time::Instant::now());
+            }
+            let mut images = params
+                .as_ref()
+                .and_then(|p| p.get("images"))
+                .and_then(|value| value.as_array())
+                .map(|images| {
+                    images
+                        .iter()
+                        .map(|image| {
+                            let media_type = image
+                                .get("media_type")
+                                .or_else(|| image.get("mime_type"))
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| (-32602, "Image is missing media_type".into()))?;
+                            let data = image
+                                .get("data")
+                                .and_then(|value| value.as_str())
+                                .ok_or_else(|| (-32602, "Image is missing base64 data".into()))?;
+                            Ok((media_type.to_string(), data.to_string()))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if text.trim().is_empty() && images.is_empty() {
+                return Err((-32602, "Prompt text must not be empty".into()));
+            }
+            if steer_requested {
+                let steer_text = text.clone();
+                let mailbox = state
+                    .steer_mailboxes
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned()
+                    .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+                match push_steer_tolerating_turn_start(
+                    &mailbox,
+                    &state.turn_locks,
+                    &session_id,
+                    SteerInput { text, images },
+                    TURN_PERMIT_GRACE,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let _ = rpc_event_tx
+                            .send(Frame::Event {
+                                event: "agent".into(),
+                                scope: None,
+                                data: serde_json::to_value(AgentEvent::SteerInput {
+                                    session_id: session_id.clone(),
+                                    text: steer_text,
+                                    idempotency_key: idempotency_key.clone(),
+                                })
+                                .unwrap_or_default(),
+                            })
+                            .await;
+                        return Ok(serde_json::json!({
+                            "ok": true,
+                            "session_id": session_id,
+                            "steered": true,
+                        }));
+                    }
+                    Err(input) => {
+                        // Kimi-compatible idle behavior: a steer that loses the
+                        // active-turn race becomes a normal new turn.
+                        text = input.text;
+                        images = input.images;
+                    }
+                }
+            }
+            let turn_permit = state
+                .turn_locks
+                .try_acquire_with_grace(&session_id, TURN_PERMIT_GRACE)
+                .await
+                .map_err(|message| (-32001, message))?;
+
+            {
+                let mut sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.clear_interrupt();
+                    // Drain due cron-fire XML into the conversation.
+                    let fires = {
+                        let mut g = state.cron_fires.lock().await;
+                        g.drain(..).collect::<Vec<_>>()
+                    };
+                    for xml in fires {
+                        session.add_user_message(xml);
+                    }
+                    // Media @path refs → blob store note.
+                    let media_refs = kkagent_core::resolve_media_refs(&text, &session.working_dir);
+                    if !media_refs.is_empty() {
+                        let store = kkagent_core::BlobStore::session_store(&session.working_dir);
+                        let mut note = String::from("<system-reminder>\nAttached media paths:\n");
+                        for p in media_refs {
+                            if let Ok(bytes) = std::fs::read(&p) {
+                                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+                                if let Ok((id, path)) = store.put(&bytes, ext).await {
+                                    note.push_str(&format!(
+                                        "- {} → blob:{id} ({})\n",
+                                        p.display(),
+                                        path.display()
+                                    ));
+                                }
+                            }
+                        }
+                        note.push_str("</system-reminder>");
+                        session.add_user_message(note);
+                    }
+                    session
+                        .add_user_message_with_images(text, images)
+                        .map_err(|error| (-32602, format!("Invalid image input: {error}")))?;
+                    session.begin_turn();
+                } else {
+                    return Err((-32602, format!("Session not found: {}", session_id)));
+                }
+            }
+            // Persist without holding `sessions` + `transcript` together (avoid deadlock)
+            {
+                let snapshot = {
+                    let sessions = state.sessions.lock().await;
+                    sessions.get(&session_id).map(|s| {
+                        let rewrite = s.transcript_rewrite_required;
+                        let start = if rewrite {
+                            0
+                        } else {
+                            s.persisted_message_count.min(s.messages.len())
+                        };
+                        (
+                            s.messages[start..].to_vec(),
+                            start,
+                            s.title.clone(),
+                            rewrite,
+                        )
+                    })
+                };
+                if let Some((pending, start, title, rewrite)) = snapshot {
+                    let mut new_title = title;
+                    let persisted = {
+                        let db = state.transcript.lock().await;
+                        let result = if rewrite {
+                            serialize_transcript_messages(&pending).and_then(|messages| {
+                                db.replace_messages(&session_id, &messages, None)
+                            })
+                        } else {
+                            serialize_transcript_messages(&pending)
+                                .and_then(|messages| db.append_messages(&session_id, &messages))
+                        };
+                        if result.is_ok() && new_title.is_none() {
+                            if let Some(text) = pending.iter().find_map(|message| {
+                                if message.role != "user" {
+                                    return None;
+                                }
+                                let text = message.content.iter().find_map(|c| match c {
+                                    ChatContent::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })?;
+                                if kkagent_protocol::is_harness_only_user_text(text) {
+                                    return None;
+                                }
+                                let visible = kkagent_protocol::visible_user_text(text);
+                                if visible.is_empty() {
+                                    None
+                                } else {
+                                    Some(visible)
+                                }
+                            }) {
+                                let title: String = text.chars().take(200).collect();
+                                if db.set_title(&session_id, &title).is_ok() {
+                                    new_title = Some(title);
+                                }
+                            }
+                        }
+                        if let Err(error) = &result {
+                            tracing::warn!("Failed to persist session prompt: {error}");
+                        }
+                        result.is_ok()
+                    };
+                    if persisted {
+                        if let Some(session) = state.sessions.lock().await.get_mut(&session_id) {
+                            session.persisted_message_count = start + pending.len();
+                            session.transcript_rewrite_required = false;
+                            if session.title.is_none() {
+                                session.title = new_title;
+                            }
+                        }
+                    }
+                }
+            }
+
+            spawn_session_agent_turn(state, session_id, turn_permit).await?;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.goal" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let action = params
+                .as_ref()
+                .and_then(|p| p.get("action"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("status");
+            let objective = params
+                .as_ref()
+                .and_then(|p| p.get("objective"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let budget_unit = params
+                .as_ref()
+                .and_then(|p| p.get("unit"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let budget_value = params.as_ref().and_then(|p| p.get("value"));
+
+            async fn goal_snapshot(mgr: &kkagent_protocol::goal::GoalManager) -> serde_json::Value {
+                match mgr.snapshot_with_budget().await {
+                    Some((goal, budget)) => serde_json::json!({
+                        "goal": goal,
+                        "budget": budget,
+                    }),
+                    None => serde_json::json!({
+                        "goal": null,
+                        "budget": null,
+                    }),
+                }
+            }
+
+            let publish_goal = |sid: String, body: &serde_json::Value, change: &str| {
+                state.publish_rpc_event(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::GoalUpdated {
+                        session_id: sid,
+                        goal: body.get("goal").cloned(),
+                        budget: body.get("budget").cloned(),
+                        change: change.to_string(),
+                    })
+                    .unwrap_or_default(),
+                });
+            };
+
+            let goal_mgr = state.goal_for(&session_id).await;
+            match action {
+                "status" | "get" => Ok(goal_snapshot(&goal_mgr).await),
+                "pause" => {
+                    goal_mgr.pause_goal().await;
+                    let body = goal_snapshot(&goal_mgr).await;
+                    publish_goal(session_id, &body, "paused");
+                    Ok(body)
+                }
+                "resume" => {
+                    if !goal_mgr.resume_goal().await {
+                        return Err((
+                            -32000,
+                            "Goal could not be resumed. It may already be active, missing, or still have an exhausted budget; increase/clear the budget or replace the goal first."
+                                .into(),
+                        ));
+                    }
+                    let body = goal_snapshot(&goal_mgr).await;
+                    let should_prompt = goal_mgr.should_continue().await;
+                    publish_goal(session_id.clone(), &body, "resumed");
+                    if should_prompt {
+                        let prompt = format!(
+                            "<system-reminder>\n{}\n</system-reminder>",
+                            kkagent_protocol::goal::GOAL_CONTINUATION_PROMPT
+                        );
+                        {
+                            let mut sessions = state.sessions.lock().await;
+                            if let Some(session) = sessions.get_mut(&session_id) {
+                                session.add_user_message(prompt);
+                            }
+                        }
+                        match state.turn_locks.try_acquire(&session_id).await {
+                            Ok(turn_permit) => {
+                                let _ = spawn_session_agent_turn(
+                                    state.clone(),
+                                    session_id,
+                                    turn_permit,
+                                )
+                                .await;
+                            }
+                            Err(err) => tracing::warn!("goal resume turn skipped: {err}"),
+                        }
+                    }
+                    Ok(body)
+                }
+                "budget" => {
+                    let unit = budget_unit
+                        .as_deref()
+                        .ok_or_else(|| (-32602, "budget unit is required".into()))?;
+                    let value = match budget_value {
+                        Some(value) if value.is_null() => None,
+                        Some(value) => {
+                            Some(value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                                (
+                                    -32602,
+                                    "budget value must be a positive integer or null".into(),
+                                )
+                            })?)
+                        }
+                        None => return Err((-32602, "budget value is required".into())),
+                    };
+                    let Some(goal) = goal_mgr.get_goal().await else {
+                        return Err((-32000, "No active goal.".into()));
+                    };
+                    let mut budget = goal.budget;
+                    budget
+                        .set_unit(unit, value)
+                        .map_err(|error| (-32602, error))?;
+                    goal_mgr.update_budget(budget).await;
+                    let body = goal_snapshot(&goal_mgr).await;
+                    publish_goal(session_id, &body, "budget_updated");
+                    Ok(body)
+                }
+                "cancel" => {
+                    let _ = goal_mgr.cancel_goal().await;
+                    state.judge_chat_history.lock().await.remove(&session_id);
+                    let body = goal_snapshot(&goal_mgr).await;
+                    publish_goal(session_id.clone(), &body, "cancelled");
+                    {
+                        let mut sessions = state.sessions.lock().await;
+                        if let Some(session) = sessions.get_mut(&session_id) {
+                            session.add_user_message(format!(
+                                "<system-reminder>\n{}\n</system-reminder>",
+                                kkagent_protocol::goal::GOAL_CANCELLED_REMINDER
+                            ));
+                        }
+                    }
+                    Ok(body)
+                }
+                "criterion" => {
+                    let text = params
+                        .as_ref()
+                        .and_then(|p| {
+                            p.get("text")
+                                .or_else(|| p.get("criterion"))
+                                .or_else(|| p.get("completion_criterion"))
+                        })
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if text.is_empty() {
+                        // Read semantics: snapshot includes the criterion.
+                        return Ok(goal_snapshot(&goal_mgr).await);
+                    }
+                    if goal_mgr.get_goal().await.is_none() {
+                        return Err((-32000, "No active goal.".into()));
+                    }
+                    goal_mgr.set_completion_criterion(&text).await;
+                    let body = goal_snapshot(&goal_mgr).await;
+                    publish_goal(session_id.clone(), &body, "criterion_updated");
+                    Ok(body)
+                }
+                "discuss" => {
+                    let text = params
+                        .as_ref()
+                        .and_then(|p| p.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .ok_or_else(|| (-32602, "discuss text is required".into()))?
+                        .to_string();
+                    if !state.config().goal.judge_enabled {
+                        return Err((
+                            -32000,
+                            "Judge discussion requires [goal] judge_enabled = true.".into(),
+                        ));
+                    }
+                    let working_dir = {
+                        let sessions = state.sessions.lock().await;
+                        sessions
+                            .get(&session_id)
+                            .map(|s| s.working_dir.clone())
+                            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+                    };
+                    let judge_lock = {
+                        let mut locks = state.judge_chat_locks.lock().await;
+                        locks
+                            .entry(session_id.clone())
+                            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                            .clone()
+                    };
+                    // One judge persona: discussion and verdict turns
+                    // serialize on this lock. The verdict gate takes it via
+                    // try-lock elsewhere; here we queue behind any verdict.
+                    let _permit = judge_lock.lock().await;
+                    let mut history = {
+                        let mut all = state.judge_chat_history.lock().await;
+                        all.entry(session_id.clone()).or_default().clone()
+                    };
+                    // Cap the rendered history to the last 20 exchanges.
+                    if history.len() > 20 {
+                        let skip = history.len() - 20;
+                        history = history.split_off(skip);
+                    }
+                    let record = kkagent_core::goal_judge::run_goal_judge_discussion(
+                        state.config(),
+                        working_dir,
+                        &goal_mgr,
+                        &history,
+                        &text,
+                    )
+                    .await
+                    .map_err(|error| (-32000, error))?;
+                    {
+                        let mut all = state.judge_chat_history.lock().await;
+                        let entries = all.entry(session_id.clone()).or_default();
+                        entries.push(("user".to_string(), text.clone()));
+                        entries.push(("judge".to_string(), record.reply.clone()));
+                    }
+                    let reply = record.reply.clone();
+                    state.publish_rpc_event(Frame::Event {
+                        event: "agent".into(),
+                        scope: None,
+                        data: serde_json::to_value(AgentEvent::GoalJudgeChat {
+                            session_id: session_id.clone(),
+                            text: reply,
+                            criterion_note: record.criterion_note.clone(),
+                        })
+                        .unwrap_or_default(),
+                    });
+                    Ok(serde_json::json!({
+                        "reply": record.reply,
+                        "criterion_note": record.criterion_note,
+                        "criterion_updated": record.criterion_updated,
+                    }))
+                }
+                "create" | "replace" | "start" => {
+                    if objective.is_empty() {
+                        return Err((-32602, "objective is required".into()));
+                    }
+                    let replace = action == "replace"
+                        || params
+                            .as_ref()
+                            .and_then(|p| p.get("replace"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                    if let Some(existing) = goal_mgr.get_goal().await {
+                        if !existing.is_terminal() && !replace && action != "replace" {
+                            return Err((
+                                -32000,
+                                format!(
+                                    "A goal is already active ({}). Use action=replace.",
+                                    existing.description
+                                ),
+                            ));
+                        }
+                    }
+                    let goal = if replace || action == "replace" {
+                        goal_mgr
+                            .replace_goal(&objective, kkagent_protocol::goal::GoalBudget::default())
+                            .await
+                    } else {
+                        goal_mgr
+                            .create_goal(&objective, kkagent_protocol::goal::GoalBudget::default())
+                            .await
+                    };
+                    let body = goal_snapshot(&goal_mgr).await;
+                    publish_goal(session_id.clone(), &body, "created");
+                    // A new goal starts with a fresh judge discussion.
+                    state.judge_chat_history.lock().await.remove(&session_id);
+                    let prompt = format!(
+                        "Pursue this goal until complete or blocked.\n\n{}\n\n{}",
+                        goal.untrusted_objective_xml(),
+                        kkagent_protocol::goal::GOAL_CONTINUATION_PROMPT
+                    );
+                    // The session may be checked out of `sessions` mid-turn
+                    // (owned by the agent loop). Fall back to steering the
+                    // running turn instead of failing with "Session not
+                    // found" — the goal prompt is applied at the next model
+                    // step and the turn keeps running.
+                    let delivered = {
+                        let mut sessions = state.sessions.lock().await;
+                        match sessions.get_mut(&session_id) {
+                            Some(session) => {
+                                session.add_user_message(prompt);
+                                true
+                            }
+                            None => {
+                                drop(sessions);
+                                let mailbox =
+                                    state.steer_mailboxes.lock().await.get(&session_id).cloned();
+                                match mailbox {
+                                    Some(mailbox) => {
+                                        match push_steer_tolerating_turn_start(
+                                            &mailbox,
+                                            &state.turn_locks,
+                                            &session_id,
+                                            SteerInput {
+                                                text: prompt,
+                                                images: Vec::new(),
+                                            },
+                                            TURN_PERMIT_GRACE,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => true,
+                                            Err(_) => false,
+                                        }
+                                    }
+                                    None => false,
+                                }
+                            }
+                        }
+                    };
+                    if !delivered {
+                        return Err((-32602, format!("Session not found: {session_id}")));
+                    }
+                    let turn_permit = state.turn_locks.try_acquire(&session_id).await;
+                    // Session was idle: run the goal turn immediately.
+                    // Mid-turn acquisition fails, but the steer above already
+                    // delivered the goal prompt into the running turn's
+                    // mailbox.
+                    if let Ok(turn_permit) = turn_permit {
+                        spawn_session_agent_turn(state.clone(), session_id, turn_permit).await?;
+                    }
+                    Ok(body)
+                }
+                other => Err((-32602, format!("Unknown goal action: {other}"))),
+            }
+        }
+        "session.interrupt" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+
+            // Always flip the cooperative cancel flag first (works while session is out of the map).
+            if let Some(flag) = state.interrupt_flags.lock().await.get(&session_id) {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            state.clear_pending_question(&session_id, None).await;
+            state.clear_pending_tool_approval(&session_id, None).await;
+            state
+                .set_reconnect_status(&session_id, SessionStatus::Cancelling)
+                .await;
+            if let Some(session) = state.sessions.lock().await.get(&session_id) {
+                session.request_interrupt();
+            }
+            // Abort LLM stream task if still registered (no-op once tools are running).
+            if let Some(handle) = state.abort_registry.lock().await.remove(&session_id) {
+                handle.abort();
+            }
+            // Kill any background Bash jobs owned by this session.
+            state.bash_shells.cancel_session(&session_id).await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.btw" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let question = params
+                .as_ref()
+                .and_then(|p| p.get("text").or_else(|| p.get("question")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if question.is_empty() {
+                return Err((-32602, "BTW question must not be empty".into()));
+            }
+
+            let idle_target = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(&session_id).map(|session| {
+                    (
+                        session.services.btw.clone(),
+                        session.services.agents.clone(),
+                        session.messages.clone(),
+                        session.get_model_alias(),
+                    )
+                })
+            };
+            let (btw_service, agents, messages, model_alias) = if let Some(target) = idle_target {
+                target
+            } else {
+                let active = state
+                    .active_btw_sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned()
+                    .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+                let messages = active
+                    .history
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let model_alias = state
+                    .model_aliases
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .map(|alias| {
+                        alias
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clone()
+                    })
+                    .filter(|alias| !alias.is_empty())
+                    .or_else(|| state.config().default_model_alias().map(str::to_owned))
+                    .ok_or_else(|| (-32000, "No default_model in config".into()))?;
+                (active.service, active.agents, messages, model_alias)
+            };
+            if !btw_service.try_begin() {
+                return Err((
+                    -32001,
+                    "Wait for /btw to finish before sending another question.".into(),
+                ));
+            }
+            let agent_id = btw_service.start(&agents);
+            let history = btw_service.context_snapshot(&messages);
+            let prior_turns = btw_service.turns();
+            let cancel = btw_service.cancel_flag();
+            cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+
+            state
+                .remember_pending_btw(
+                    &session_id,
+                    PendingBtwUi {
+                        agent_id: agent_id.clone(),
+                        question: question.clone(),
+                        answer: String::new(),
+                        thinking: String::new(),
+                        streaming: true,
+                        turns: prior_turns.clone(),
+                        retry_status: None,
+                    },
+                )
+                .await;
+
+            let rpc_state = state.clone();
+            let config = state.config();
+            let sid = session_id.clone();
+            let q = question.clone();
+            let event_agent_id = agent_id.clone();
+            let task_btw_service = btw_service.clone();
+            tokio::spawn(async move {
+                let mut answer = String::new();
+                let mut thinking = String::new();
+                let mut stream_error: Option<String> = None;
+                let max_attempts = config
+                    .loop_control
+                    .as_ref()
+                    .map(|control| control.max_attempts_per_step)
+                    .unwrap_or(3)
+                    .max(1);
+                let retry_base = Duration::from_secs(
+                    config
+                        .loop_control
+                        .as_ref()
+                        .map(|control| control.rate_limit_retry_base_seconds)
+                        .unwrap_or(5),
+                );
+
+                for attempt in 1..=max_attempts {
+                    let (stream_tx, mut stream_rx) =
+                        mpsc::channel::<kkagent_llm::types::StreamEvent>(256);
+                    let stream_task = {
+                        let config = config.clone();
+                        let history = history.clone();
+                        let prior = prior_turns.clone();
+                        let question = q.clone();
+                        let model_alias = model_alias.clone();
+                        let cancel = cancel.clone();
+                        tokio::spawn(async move {
+                            SessionBtwService::stream_side_question(
+                                &config,
+                                &model_alias,
+                                &history,
+                                &prior,
+                                &question,
+                                stream_tx,
+                                cancel,
+                            )
+                            .await
+                        })
+                    };
+
+                    let mut attempt_error: Option<String> = None;
+                    let mut retry_after = None;
+                    let mut rate_limited = false;
+                    let mut emitted_output = false;
+                    while let Some(evt) = stream_rx.recv().await {
+                        match evt {
+                            kkagent_llm::types::StreamEvent::TextDelta(text) => {
+                                emitted_output = true;
+                                answer.push_str(&text);
+                                {
+                                    let mut pending = rpc_state.pending_btw.lock().await;
+                                    if let Some(btw) = pending.get_mut(&sid) {
+                                        if btw.agent_id == event_agent_id {
+                                            btw.answer.push_str(&text);
+                                            btw.retry_status = None;
+                                        }
+                                    }
+                                }
+                                rpc_state.publish_rpc_event(Frame::Event {
+                                    event: "agent".into(),
+                                    scope: None,
+                                    data: serde_json::to_value(AgentEvent::BtwDelta {
+                                        session_id: sid.clone(),
+                                        agent_id: event_agent_id.clone(),
+                                        text,
+                                    })
+                                    .unwrap_or_default(),
+                                });
+                            }
+                            kkagent_llm::types::StreamEvent::ThinkingDelta(text) => {
+                                emitted_output = true;
+                                thinking.push_str(&text);
+                                {
+                                    let mut pending = rpc_state.pending_btw.lock().await;
+                                    if let Some(btw) = pending.get_mut(&sid) {
+                                        if btw.agent_id == event_agent_id {
+                                            btw.thinking.push_str(&text);
+                                            btw.retry_status = None;
+                                        }
+                                    }
+                                }
+                                rpc_state.publish_rpc_event(Frame::Event {
+                                    event: "agent".into(),
+                                    scope: None,
+                                    data: serde_json::to_value(AgentEvent::BtwThinkingDelta {
+                                        session_id: sid.clone(),
+                                        agent_id: event_agent_id.clone(),
+                                        text,
+                                    })
+                                    .unwrap_or_default(),
+                                });
+                            }
+                            kkagent_llm::types::StreamEvent::Error(message) => {
+                                attempt_error = Some(message);
+                            }
+                            kkagent_llm::types::StreamEvent::RateLimited {
+                                message,
+                                retry_after: server_delay,
+                            } => {
+                                attempt_error = Some(message);
+                                retry_after = server_delay;
+                                rate_limited = true;
+                            }
+                            kkagent_llm::types::StreamEvent::MessageEnd { .. } => {}
+                            _ => {}
+                        }
+                    }
+
+                    if let Err(error) = stream_task.await.unwrap_or(Ok(())) {
+                        if attempt_error.is_none() {
+                            attempt_error = Some(error.to_string());
+                        }
+                    }
+                    let retryable = attempt_error.is_some()
+                        && !emitted_output
+                        && attempt < max_attempts
+                        && !cancel.load(std::sync::atomic::Ordering::SeqCst);
+                    if retryable {
+                        let delay = btw_retry_delay(attempt, retry_after, rate_limited, retry_base);
+                        let reason = attempt_error.as_deref().unwrap_or("LLM request failed");
+                        {
+                            let mut pending = rpc_state.pending_btw.lock().await;
+                            if let Some(btw) = pending.get_mut(&sid) {
+                                if btw.agent_id == event_agent_id {
+                                    btw.retry_status = Some(format!(
+                                        "retry {attempt} in {}s: {reason}",
+                                        delay.as_secs().max(1)
+                                    ));
+                                }
+                            }
+                        }
+                        let publish = |frame: Frame| rpc_state.publish_rpc_event(frame);
+                        if wait_for_btw_retry(
+                            &publish,
+                            &sid,
+                            &event_agent_id,
+                            attempt,
+                            reason,
+                            delay,
+                            &cancel,
+                        )
+                        .await
+                        {
+                            continue;
+                        }
+                    }
+                    stream_error = attempt_error;
+                    break;
+                }
+
+                if stream_error.is_none()
+                    && !answer.trim().is_empty()
+                    && task_btw_service.is_current(&cancel)
+                {
+                    task_btw_service.push_turn(BtwTurn {
+                        question: q.clone(),
+                        answer: answer.clone(),
+                    });
+                }
+
+                task_btw_service.end(&cancel);
+
+                {
+                    let mut pending = rpc_state.pending_btw.lock().await;
+                    if let Some(btw) = pending.get_mut(&sid) {
+                        if btw.agent_id == event_agent_id {
+                            btw.streaming = false;
+                            btw.retry_status = None;
+                            btw.turns = task_btw_service.turns();
+                            if stream_error.is_some() {
+                                btw.answer = answer;
+                                btw.thinking = thinking;
+                            } else {
+                                btw.question.clear();
+                                btw.answer.clear();
+                                btw.thinking.clear();
+                            }
+                        }
+                    }
+                }
+
+                rpc_state.publish_rpc_event(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::BtwEnd {
+                        session_id: sid,
+                        agent_id: event_agent_id,
+                        error: stream_error,
+                    })
+                    .unwrap_or_default(),
+                });
+            });
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "agent_id": agent_id,
+                "question": question,
+            }))
+        }
+        "session.btw_cancel" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let service = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(session_id)
+                    .map(|session| session.services.btw.clone())
+            };
+            if let Some(service) = service {
+                service.request_cancel();
+            } else if let Some(active) = state.active_btw_sessions.lock().await.get(session_id) {
+                active.service.request_cancel();
+            }
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.btw_delete" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let target = {
+                let sessions = state.sessions.lock().await;
+                sessions.get(session_id).map(|session| {
+                    (
+                        session.services.btw.clone(),
+                        session.services.agents.clone(),
+                    )
+                })
+            };
+            if let Some((service, agents)) = target {
+                service.clear(&agents);
+            } else if let Some(active) = state.active_btw_sessions.lock().await.get(session_id) {
+                active.service.clear(&active.agents);
+            }
+            state.clear_pending_btw(session_id).await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.set_prompt_queue" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let selected = params
+                .as_ref()
+                .and_then(|p| p.get("selected"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let items = params
+                .as_ref()
+                .and_then(|p| p.get("items"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let text = item.get("text")?.as_str()?.to_string();
+                            let id = item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                            let images = item
+                                .get("images")
+                                .and_then(|v| v.as_array())
+                                .map(|imgs| {
+                                    imgs.iter()
+                                        .filter_map(|img| {
+                                            let media_type = img
+                                                .get("media_type")
+                                                .or_else(|| img.get("mime_type"))
+                                                .and_then(|v| v.as_str())?
+                                                .to_string();
+                                            let data = img
+                                                .get("data")
+                                                .and_then(|v| v.as_str())?
+                                                .to_string();
+                                            Some((media_type, data))
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            let as_steer = item
+                                .get("as_steer")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            Some(PromptQueueItem {
+                                id,
+                                text,
+                                images,
+                                as_steer,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let selected = if items.is_empty() {
+                0
+            } else {
+                selected.min(items.len() - 1)
+            };
+            state
+                .set_prompt_queue_snapshot(&session_id, PromptQueueSnapshot { selected, items })
+                .await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.set_permission_mode" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mode: PermissionMode = params
+                .as_ref()
+                .and_then(|p| p.get("mode"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            // Always update the shared Arc (works mid-turn while session is out of the map).
+            let mut updated = false;
+            if let Some(arc) = state.permission_modes.lock().await.get(&session_id) {
+                *arc.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+                updated = true;
+            }
+            if let Some(session) = state.sessions.lock().await.get(&session_id) {
+                session.set_permission_mode(mode);
+                updated = true;
+            }
+            if !updated {
+                return Err((-32602, format!("Session not found: {}", session_id)));
+            }
+            tracing::info!("Session {} permission mode set to {}", session_id, mode);
+            let _ = rpc_event_tx
+                .send(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::SessionConfigChanged {
+                        session_id: session_id.clone(),
+                        permission_mode: Some(mode.to_string()),
+                        model: None,
+                        plan_mode: None,
+                        working_dir: None,
+                        source: Some("rpc".into()),
+                    })
+                    .unwrap_or_default(),
+                })
+                .await;
+            Ok(serde_json::json!({"ok": true, "mode": mode}))
+        }
+        "session.set_plan_mode" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let enabled = params
+                .as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if session_id.is_empty() {
+                return Err((-32602, "Missing session_id".into()));
+            }
+
+            let mut request = state
+                .plan_mode_requests
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned();
+            if request.is_none() {
+                ensure_session_loaded(&state, &session_id)
+                    .await
+                    .map_err(|error| {
+                        if error == "session not found" {
+                            (-32602, format!("Session not found: {session_id}"))
+                        } else {
+                            (-32000, error)
+                        }
+                    })?;
+                request = state
+                    .plan_mode_requests
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned();
+            }
+
+            let request =
+                request.ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+            request.store(enabled, std::sync::atomic::Ordering::SeqCst);
+
+            // If the turn has already put the Session back, persist now. If it
+            // is still running, AgentLoop (and its locked reinsertion path)
+            // consumes the shared request without rejecting the RPC.
+            if let Some(session) = state.sessions.lock().await.get_mut(&session_id) {
+                session
+                    .sync_requested_plan_mode()
+                    .map_err(|error| (-32000, error.to_string()))?;
+            }
+            let _ = rpc_event_tx
+                .send(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::SessionConfigChanged {
+                        session_id: session_id.clone(),
+                        permission_mode: None,
+                        model: None,
+                        plan_mode: Some(enabled),
+                        working_dir: None,
+                        source: Some("rpc".into()),
+                    })
+                    .unwrap_or_default(),
+                })
+                .await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "session.set_model" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let model = params
+                .as_ref()
+                .and_then(|p| p.get("model"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing model".into()))?
+                .to_string();
+            if state.config().resolve_model(&model).is_none() {
+                return Err((-32602, format!("Unknown model: {}", model)));
+            }
+            // Always update the shared Arc (works mid-turn while session is out of the map).
+            let mut updated = false;
+            if let Some(arc) = state.model_aliases.lock().await.get(&session_id) {
+                *arc.lock().unwrap_or_else(|e| e.into_inner()) = model.clone();
+                updated = true;
+            }
+            if let Some(session) = state.sessions.lock().await.get(&session_id) {
+                session.set_model_alias(model.clone());
+                updated = true;
+            }
+            if !updated {
+                return Err((-32602, format!("Session not found: {}", session_id)));
+            }
+            // Persist so resume restores this session's model (not global default).
+            state
+                .transcript
+                .lock()
+                .await
+                .set_model(&session_id, &model)
+                .map_err(|e| (-32000, e.to_string()))?;
+            tracing::info!("Session {} model set to {}", session_id, model);
+            let _ = rpc_event_tx
+                .send(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::SessionConfigChanged {
+                        session_id: session_id.clone(),
+                        permission_mode: None,
+                        model: Some(model.clone()),
+                        plan_mode: None,
+                        working_dir: None,
+                        source: Some("rpc".into()),
+                    })
+                    .unwrap_or_default(),
+                })
+                .await;
+            Ok(serde_json::json!({"ok": true, "model": model}))
+        }
+        "session.set_fallback_model" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mode = params
+                .as_ref()
+                .and_then(|p| p.get("mode"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing fallback mode".into()))?;
+            let fallback = match mode {
+                "inherit" => SessionFallbackModel::Inherit,
+                "disabled" => SessionFallbackModel::Disabled,
+                "model" => {
+                    let model = params
+                        .as_ref()
+                        .and_then(|p| p.get("model"))
+                        .and_then(|v| v.as_str())
+                        .filter(|model| !model.is_empty())
+                        .ok_or_else(|| (-32602, "Missing fallback model".into()))?;
+                    if state.config().resolve_model(model).is_none() {
+                        return Err((-32602, format!("Unknown fallback model: {model}")));
+                    }
+                    let primary = state
+                        .model_aliases
+                        .lock()
+                        .await
+                        .get(&session_id)
+                        .map(|alias| alias.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                        .or_else(|| {
+                            state.sessions.try_lock().ok().and_then(|sessions| {
+                                sessions.get(&session_id).map(Session::get_model_alias)
+                            })
+                        });
+                    if primary.as_deref() == Some(model) {
+                        return Err((
+                            -32602,
+                            "Fallback model must differ from the session model".into(),
+                        ));
+                    }
+                    SessionFallbackModel::Model(model.to_string())
+                }
+                _ => return Err((-32602, format!("Unknown fallback mode: {mode}"))),
+            };
+
+            let mut updated = false;
+            if let Some(handle) = state.fallback_models.lock().await.get(&session_id) {
+                *handle.lock().unwrap_or_else(|e| e.into_inner()) = fallback.clone();
+                updated = true;
+            }
+            if let Some(session) = state.sessions.lock().await.get(&session_id) {
+                session.set_fallback_model(fallback.clone());
+                updated = true;
+            }
+            if !updated {
+                return Err((-32602, format!("Session not found: {session_id}")));
+            }
+            state
+                .transcript
+                .lock()
+                .await
+                .set_fallback_model(&session_id, fallback.persisted_value())
+                .map_err(|e| (-32000, e.to_string()))?;
+            tracing::info!(session_id, mode, "Session fallback model updated");
+            Ok(serde_json::json!({
+                "ok": true,
+                "mode": mode,
+                "model": fallback.persisted_value().filter(|model| !model.is_empty()),
+            }))
+        }
+        "session.cancel_tool" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let tool_call_id = params
+                .as_ref()
+                .and_then(|p| p.get("tool_call_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing tool_call_id".into()))?
+                .to_string();
+            // Best-effort: cancel matching background shell jobs for this session.
+            let stopped = state.bash_shells.stop(&tool_call_id).await;
+            if !stopped {
+                // Also try listing and stopping by description match — shell_id may differ.
+                for (id, _desc, _status, running) in state.bash_shells.list_jobs().await {
+                    if running && id.contains(&tool_call_id) {
+                        let _ = state.bash_shells.stop(&id).await;
+                    }
+                }
+            }
+            let _ = rpc_event_tx
+                .send(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::ToolCancelled {
+                        session_id: session_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        reason: Some("cancelled by user".into()),
+                    })
+                    .unwrap_or_default(),
+                })
+                .await;
+            Ok(serde_json::json!({
+                "ok": true,
+                "tool_call_id": tool_call_id,
+                "stopped_shell": stopped,
+            }))
+        }
+        "session.set_title" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let title = params
+                .as_ref()
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing title".into()))?
+                .to_string();
+            {
+                let mut sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session
+                        .set_title_persisted(title.clone())
+                        .map_err(|e| (-32000, e.to_string()))?;
+                }
+            }
+            let _ = SessionStore::open_default().rename(&session_id, &title);
+            let db = state.transcript.lock().await;
+            let _ = db.set_title(&session_id, &title);
+            Ok(serde_json::json!({"ok": true, "title": title}))
+        }
+        "session.undo" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let count = params
+                .as_ref()
+                .and_then(|p| p.get("count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as usize;
+
+            let (undone, keep) = {
+                let mut sessions = state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {}", session_id)))?;
+                let result = kkagent_core::UndoService::undo_turns(session, count);
+                if result.undone_turns == 0 {
+                    return Err((-32000, "Nothing to undo".into()));
+                }
+                (result.undone_turns, result.message_count)
+            };
+            {
+                let db = state.transcript.lock().await;
+                let _ = db.truncate_messages(&session_id, keep);
+            }
+            let messages = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(&session_id)
+                    .map(|s| s.messages.clone())
+                    .unwrap_or_default()
+            };
+            Ok(serde_json::json!({
+                "ok": true,
+                "undone": undone,
+                "message_count": keep,
+                "messages": messages,
+            }))
+        }
+        "session.restore" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let turn_index = params
+                .as_ref()
+                .and_then(|p| p.get("turn_index"))
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| (-32602, "Missing turn_index".into()))?
+                as usize;
+            ensure_session_loaded(&state, &session_id)
+                .await
+                .map_err(|error| {
+                    if error == "session not found" {
+                        (-32602, format!("Session not found: {session_id}"))
+                    } else {
+                        (-32000, error)
+                    }
+                })?;
+            let (undone, keep, already_current) = {
+                let mut sessions = state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {}", session_id)))?;
+                let starts = session.user_turn_starts();
+                let keep_index = *starts
+                    .get(turn_index)
+                    .ok_or_else(|| (-32602, format!("Turn not found: {turn_index}")))?;
+                if turn_index + 1 >= starts.len() {
+                    (0usize, session.messages.len(), true)
+                } else {
+                    let (undone, keep) = session
+                        .restore_keeping_user_message(keep_index)
+                        .map_err(|error| (-32000, error.to_string()))?;
+                    (undone, keep, false)
+                }
+            };
+            {
+                let db = state.transcript.lock().await;
+                let _ = db.truncate_messages(&session_id, keep);
+            }
+            let messages = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(&session_id)
+                    .map(|s| s.messages.clone())
+                    .unwrap_or_default()
+            };
+            Ok(serde_json::json!({
+                "ok": true,
+                "restored": !already_current,
+                "undone": undone,
+                "turn_index": turn_index,
+                "message_count": keep,
+                "messages": messages,
+            }))
+        }
+        "skills.list" => {
+            let list = state.skills.list().await;
+            let mut items = Vec::new();
+            for e in list {
+                let enabled = state.skills.is_enabled(&e.name).await;
+                items.push(serde_json::json!({
+                    "name": e.name,
+                    "description": e.description,
+                    "path": e.path.display().to_string(),
+                    "triggers": e.triggers,
+                    "enabled": enabled,
+                }));
+            }
+            Ok(serde_json::json!({"skills": items}))
+        }
+        "skills.set_enabled" => {
+            let name = params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing skill name".into()))?
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                return Err((-32602, "Skill name must not be empty".into()));
+            }
+            let enabled = params
+                .as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| (-32602, "Missing enabled bool".into()))?;
+            let known = state
+                .skills
+                .list()
+                .await
+                .into_iter()
+                .any(|e| e.name == name);
+            if !known {
+                return Err((-32602, format!("Skill not found: {name}")));
+            }
+            state.skills.set_skill_enabled(&name, enabled).await;
+            persist_disabled_extensions(&state)
+                .await
+                .map_err(|e| (-32000, e))?;
+            Ok(serde_json::json!({
+                "name": name,
+                "enabled": enabled,
+            }))
+        }
+        "mcp.list" => {
+            let snap = state.mcp.status_snapshot().await;
+            Ok(mcp_status_json(&snap))
+        }
+        "mcp.status" => {
+            let snap = state.mcp.status_snapshot().await;
+            Ok(mcp_status_json(&snap))
+        }
+        "mcp.set_enabled" => {
+            let name = params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing MCP server name".into()))?
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                return Err((-32602, "MCP server name must not be empty".into()));
+            }
+            let enabled = params
+                .as_ref()
+                .and_then(|p| p.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| (-32602, "Missing enabled bool".into()))?;
+            state
+                .mcp
+                .set_enabled(&name, enabled)
+                .await
+                .map_err(|e| (-32000, e.to_string()))?;
+            persist_disabled_extensions(&state)
+                .await
+                .map_err(|e| (-32000, e))?;
+            Ok(serde_json::json!({
+                "name": name,
+                "enabled": enabled,
+            }))
+        }
+        "skills.activate" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let skill_name = params
+                .as_ref()
+                .and_then(|p| p.get("name").or_else(|| p.get("skill_name")))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing skill name".into()))?
+                .trim()
+                .to_string();
+            if skill_name.is_empty() {
+                return Err((-32602, "Skill name must not be empty".into()));
+            }
+            if !state.skills.is_enabled(&skill_name).await {
+                return Err((
+                    -32000,
+                    format!("Skill \"{skill_name}\" is disabled. Enable it in /skills."),
+                ));
+            }
+            let skill_args = params
+                .as_ref()
+                .and_then(|p| p.get("args"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let turn_permit = state
+                .turn_locks
+                .try_acquire(&session_id)
+                .await
+                .map_err(|message| (-32001, message))?;
+
+            let working_dir = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .get(&session_id)
+                    .map(|s| s.working_dir.clone())
+                    .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?
+            };
+
+            let (entry, content) = state
+                .skills
+                .load_for(&working_dir, &skill_name)
+                .await
+                .map_err(|e| (-32000, e.to_string()))?;
+            let skill_dir = entry.root.to_string_lossy().to_string();
+            let prompt = kkagent_tools::render_user_slash_skill_prompt(
+                &entry.name,
+                &skill_args,
+                &content,
+                Some(&skill_dir),
+            );
+            let resolved_name = entry.name.clone();
+
+            {
+                let mut sessions = state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+                session.clear_interrupt();
+                session.add_user_message(prompt);
+                session.begin_turn();
+            }
+
+            {
+                let snapshot = {
+                    let sessions = state.sessions.lock().await;
+                    sessions.get(&session_id).map(|s| {
+                        let rewrite = s.transcript_rewrite_required;
+                        let start = if rewrite {
+                            0
+                        } else {
+                            s.persisted_message_count.min(s.messages.len())
+                        };
+                        (s.messages[start..].to_vec(), start, rewrite)
+                    })
+                };
+                if let Some((pending, start, rewrite)) = snapshot {
+                    let persisted = {
+                        let db = state.transcript.lock().await;
+                        let result = if rewrite {
+                            serialize_transcript_messages(&pending).and_then(|messages| {
+                                db.replace_messages(&session_id, &messages, None)
+                            })
+                        } else {
+                            serialize_transcript_messages(&pending)
+                                .and_then(|messages| db.append_messages(&session_id, &messages))
+                        };
+                        if let Err(error) = &result {
+                            tracing::warn!("Failed to persist skill activation: {error}");
+                        }
+                        result.is_ok()
+                    };
+                    if persisted {
+                        if let Some(session) = state.sessions.lock().await.get_mut(&session_id) {
+                            session.persisted_message_count = start + pending.len();
+                            session.transcript_rewrite_required = false;
+                            if session.title.is_none() {
+                                let title: String =
+                                    format!("/{resolved_name}").chars().take(200).collect();
+                                let db = state.transcript.lock().await;
+                                if db.set_title(&session_id, &title).is_ok() {
+                                    session.title = Some(title);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let activation_id = uuid::Uuid::new_v4().to_string();
+            let _ = rpc_event_tx
+                .send(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::SkillActivated {
+                        session_id: session_id.clone(),
+                        activation_id,
+                        skill_name: resolved_name.clone(),
+                        skill_args: if skill_args.trim().is_empty() {
+                            None
+                        } else {
+                            Some(skill_args)
+                        },
+                        trigger: "user-slash".into(),
+                    })
+                    .unwrap_or_default(),
+                })
+                .await;
+
+            spawn_session_agent_turn(state, session_id, turn_permit).await?;
+            Ok(serde_json::json!({
+                "activated": true,
+                "skill_name": resolved_name,
+            }))
+        }
+        "plugins.list" => {
+            let list = state.plugins.list().await;
+            Ok(serde_json::json!({"plugins": list}))
+        }
+        "plugins.reload" => {
+            let count = state
+                .plugins
+                .reload()
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            let (mcp_servers, tools) = refresh_plugin_mcp(&state)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({
+                "plugins": count,
+                "mcp_servers": mcp_servers,
+                "tools": tools,
+            }))
+        }
+        "plugins.marketplaces.list" => {
+            let mut marketplaces = Vec::new();
+            let mut sources = std::collections::HashSet::new();
+            for (index, catalog) in configured_plugin_marketplace_catalogs(state.config().as_ref())
+                .into_iter()
+                .enumerate()
+            {
+                if !sources.insert(catalog.source.clone()) {
+                    continue;
+                }
+                let id = if index == 0 {
+                    "default".to_string()
+                } else {
+                    format!("config-{index}")
+                };
+                let name = catalog.name.unwrap_or_else(|| {
+                    if index == 0 {
+                        "Default marketplace".into()
+                    } else {
+                        format!("Marketplace {}", index + 1)
+                    }
+                });
+                marketplaces.push(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "source": catalog.source,
+                    "removable": false,
+                }));
+            }
+            for marketplace in state
+                .plugins
+                .registered_marketplaces()
+                .await
+                .map_err(|error| (-32000, error.to_string()))?
+            {
+                if sources.insert(marketplace.source.clone()) {
+                    marketplaces.push(serde_json::json!({
+                        "id": marketplace.id,
+                        "name": marketplace.name,
+                        "source": marketplace.source,
+                        "addedAt": marketplace.added_at,
+                        "removable": true,
+                    }));
+                }
+            }
+            Ok(serde_json::json!({"marketplaces": marketplaces}))
+        }
+        "plugins.marketplaces.add" => {
+            let source = params
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| (-32602, "Missing plugin marketplace source".into()))?;
+            let name = params
+                .as_ref()
+                .and_then(|value| value.get("name"))
+                .and_then(|value| value.as_str());
+            let cwd = std::env::current_dir().map_err(|error| (-32000, error.to_string()))?;
+            let marketplace = state
+                .plugins
+                .add_marketplace(source, name, &cwd)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            serde_json::to_value(marketplace).map_err(|error| (-32000, error.to_string()))
+        }
+        "plugins.marketplaces.remove" => {
+            let id = params
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing plugin marketplace id".into()))?;
+            state
+                .plugins
+                .remove_marketplace(id)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({"id": id, "removed": true}))
+        }
+        "plugins.marketplace" => {
+            let explicit = params
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str());
+            let source = configured_plugin_marketplace(state.config().as_ref(), explicit)
+                .map_err(|error| (-32602, error.to_string()))?;
+            let cwd = std::env::current_dir().map_err(|error| (-32000, error.to_string()))?;
+            let marketplace = state
+                .plugins
+                .marketplace(&source, &cwd)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            serde_json::to_value(marketplace).map_err(|error| (-32000, error.to_string()))
+        }
+        "plugins.install" => {
+            let requested = params
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| (-32602, "Missing plugin source or marketplace id".into()))?;
+            let explicit_marketplace = params
+                .as_ref()
+                .and_then(|value| value.get("marketplace"))
+                .and_then(|value| value.as_str());
+            let local_source_exists = std::path::Path::new(requested).exists();
+            let looks_like_url = requested.starts_with("http://")
+                || requested.starts_with("https://")
+                || requested.starts_with("file://");
+            let record = if local_source_exists || looks_like_url {
+                state
+                    .plugins
+                    .install(requested, None)
+                    .await
+                    .map_err(|error| (-32000, error.to_string()))?
+            } else {
+                install_marketplace_plugin(&state, requested, explicit_marketplace)
+                    .await
+                    .map_err(|error| (-32000, error.to_string()))?
+            };
+            let (mcp_servers, tools) = refresh_plugin_mcp(&state)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({
+                "plugin": record,
+                "mcp_servers": mcp_servers,
+                "tools": tools,
+            }))
+        }
+        "plugins.update" => {
+            let id = params
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing plugin id".into()))?;
+            let managed = state
+                .plugins
+                .is_managed(id)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            let record = if managed {
+                state
+                    .plugins
+                    .update(id)
+                    .await
+                    .map_err(|error| (-32000, error.to_string()))?
+            } else {
+                install_marketplace_plugin(&state, id, None)
+                    .await
+                    .map_err(|error| (-32000, error.to_string()))?
+            };
+            let (mcp_servers, tools) = refresh_plugin_mcp(&state)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({
+                "plugin": record,
+                "mcp_servers": mcp_servers,
+                "tools": tools,
+            }))
+        }
+        "plugins.enable" | "plugins.disable" => {
+            let id = params
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing plugin id".into()))?;
+            let enabled = method == "plugins.enable";
+            state
+                .plugins
+                .set_enabled(id, enabled)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            let (mcp_servers, tools) = refresh_plugin_mcp(&state)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "enabled": enabled,
+                "mcp_servers": mcp_servers,
+                "tools": tools,
+            }))
+        }
+        "plugins.remove" => {
+            let id = params
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing plugin id".into()))?;
+            state
+                .plugins
+                .remove(id)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            let (mcp_servers, tools) = refresh_plugin_mcp(&state)
+                .await
+                .map_err(|error| (-32000, error.to_string()))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "removed": true,
+                "mcp_servers": mcp_servers,
+                "tools": tools,
+            }))
+        }
+        "plugins.info" => {
+            let id = params
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing plugin id".into()))?;
+            let plugin = state
+                .plugins
+                .list()
+                .await
+                .into_iter()
+                .find(|plugin| plugin.name == id)
+                .ok_or_else(|| (-32000, format!("plugin {id} is not installed")))?;
+            serde_json::to_value(plugin).map_err(|error| (-32000, error.to_string()))
+        }
+        "session.compact" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let instruction = params
+                .as_ref()
+                .and_then(|p| p.get("instruction"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            // Same lock as turns: refuse while a turn (or another compact) is active.
+            let turn_permit = state
+                .turn_locks
+                .try_acquire(&session_id)
+                .await
+                .map_err(|_| {
+                    (
+                        -32000,
+                        "Cannot compact while a turn is active. Wait for it to finish, then retry."
+                            .into(),
+                    )
+                })?;
+
+            let (messages, session_model_alias) = {
+                let sessions = state.sessions.lock().await;
+                if let Some(session) = sessions.get(&session_id) {
+                    (session.messages.clone(), Some(session.get_model_alias()))
+                } else {
+                    drop(sessions);
+                    let db = state.transcript.lock().await;
+                    let records = db
+                        .load_messages(&session_id)
+                        .map_err(|e| (-32000, e.to_string()))?;
+                    (messages_from_records(&records), None)
+                }
+            };
+
+            if messages.is_empty() {
+                drop(turn_permit);
+                return Err((-32000, "No messages to compact in current history.".into()));
+            }
+
+            let _ = state
+                .set_reconnect_status(&session_id, SessionStatus::Compacting)
+                .await;
+            state.publish_rpc_event(Frame::Event {
+                event: "agent".into(),
+                scope: None,
+                data: serde_json::to_value(AgentEvent::StatusUpdate {
+                    session_id: session_id.clone(),
+                    status: SessionStatus::Compacting,
+                })
+                .unwrap_or_default(),
+            });
+
+            let state_clone = state.clone();
+            let sid = session_id.clone();
+            tokio::spawn(async move {
+                let _turn_permit = turn_permit;
+                let before = messages.len();
+                let mut messages = messages;
+
+                // LLM summary can take a while — do not hold the RPC handler.
+                // The spawned task does not own the live session, so the
+                // summarizer usage cannot be folded into its tracker here.
+                let result = kkagent_core::compact_full_async(
+                    state_clone.config(),
+                    &mut messages,
+                    instruction.as_deref(),
+                    session_model_alias.as_deref(),
+                    None,
+                )
+                .await;
+
+                // Persist rebuilt history (kept users + summary). No assistant/tool
+                // tails — avoids toolcall pairing 400s after resume.
+                let replacement: Vec<(String, String)> = messages
+                    .iter()
+                    .filter_map(|m| {
+                        let json = serde_json::to_string(&m.content).ok()?;
+                        Some((m.role.clone(), json))
+                    })
+                    .collect();
+                let persist_err = {
+                    let db = state_clone.transcript.lock().await;
+                    db.replace_messages(&sid, &replacement, Some(&result.summary))
+                        .err()
+                        .map(|e| e.to_string())
+                };
+
+                let completed = if let Some(err) = persist_err {
+                    AgentEvent::CompactCompleted {
+                        session_id: sid.clone(),
+                        deleted: 0,
+                        kept_user_message_count: 0,
+                        messages: Vec::new(),
+                        error: Some(format!("Failed to persist compacted history: {err}")),
+                    }
+                } else {
+                    {
+                        let mut sessions = state_clone.sessions.lock().await;
+                        if let Some(session) = sessions.get_mut(&sid) {
+                            session.messages = messages.clone();
+                            session.persisted_message_count = session.messages.len();
+                            session.transcript_rewrite_required = false;
+                            session.invalidate_undo_message_indices();
+                            let after =
+                                kkagent_core::TokenCounter::estimate_messages(&session.messages);
+                            session.last_compacted_tokens = Some(after);
+                        }
+                    }
+                    let deleted =
+                        before.saturating_sub(result.kept_user_message_count.saturating_add(1));
+                    let messages_json: Vec<serde_json::Value> = messages
+                        .iter()
+                        .filter_map(|m| serde_json::to_value(m).ok())
+                        .collect();
+                    AgentEvent::CompactCompleted {
+                        session_id: sid.clone(),
+                        deleted: deleted as u64,
+                        kept_user_message_count: result.kept_user_message_count as u64,
+                        messages: messages_json,
+                        error: None,
+                    }
+                };
+
+                state_clone.note_agent_event_for_resume(&completed).await;
+                state_clone.publish_rpc_event(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(&completed).unwrap_or_default(),
+                });
+                state_clone.publish_rpc_event(Frame::Event {
+                    event: "agent".into(),
+                    scope: None,
+                    data: serde_json::to_value(AgentEvent::StatusUpdate {
+                        session_id: sid,
+                        status: SessionStatus::Idle,
+                    })
+                    .unwrap_or_default(),
+                });
+            });
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "started": true,
+                "session_id": session_id,
+            }))
+        }
+        "swarm.enter" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let trigger = match params
+                .as_ref()
+                .and_then(|p| p.get("trigger"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("slash")
+            {
+                "tool" => kkagent_core::SwarmModeTrigger::Tool,
+                "auto" => kkagent_core::SwarmModeTrigger::Auto,
+                _ => kkagent_core::SwarmModeTrigger::Slash,
+            };
+            let mut sessions = state.sessions.lock().await;
+            let session = if let Some(id) = session_id {
+                sessions
+                    .get_mut(&id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {id}")))?
+            } else {
+                sessions
+                    .values_mut()
+                    .next()
+                    .ok_or_else(|| (-32000, "No active session".into()))?
+            };
+            let reminder = session.swarm.enter(trigger);
+            if let Some(r) = reminder {
+                session.add_user_message(r.into());
+            }
+            Ok(serde_json::json!({
+                "ok": true,
+                "active": session.swarm.is_active(),
+                "roster": session.swarm.roster().iter().map(|m| {
+                    serde_json::json!({"id": m.id, "role": m.role, "status": m.status})
+                }).collect::<Vec<_>>(),
+            }))
+        }
+        "swarm.exit" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mut sessions = state.sessions.lock().await;
+            let session = if let Some(id) = session_id {
+                sessions
+                    .get_mut(&id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {id}")))?
+            } else {
+                sessions
+                    .values_mut()
+                    .next()
+                    .ok_or_else(|| (-32000, "No active session".into()))?
+            };
+            let reminder = session.swarm.exit();
+            if let Some(r) = reminder {
+                session.add_user_message(r.into());
+            }
+            Ok(serde_json::json!({"ok": true, "active": false}))
+        }
+        "session.usage" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let sessions = state.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?;
+            let snap = session.usage.snapshot();
+            Ok(serde_json::json!({
+                "input_tokens": snap.input_tokens,
+                "output_tokens": snap.output_tokens,
+                "cache_read_input_tokens": snap.cache_read_input_tokens,
+                "cache_creation_input_tokens": snap.cache_creation_input_tokens,
+                "steps": snap.steps,
+                "turns": snap.turns,
+                "cache_hit_ratio": snap.cache_hit_ratio(session.usage.input_includes_cache()),
+            }))
+        }
+        "tasks.list" => {
+            let all = state.subagents.list_all().await;
+            let tasks: Vec<_> = all
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "task_id": t.agent_id,
+                        "description": t.description,
+                        "status": t.status,
+                        "result": t.result,
+                        "error": t.error,
+                        "turns_used": t.turns_used,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({"tasks": tasks}))
+        }
+        "tasks.stop" => {
+            let task_id = params
+                .as_ref()
+                .and_then(|p| p.get("task_id").or_else(|| p.get("agent_id")))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing task_id".into()))?;
+            match state.subagents.stop(task_id).await {
+                Ok(state) => Ok(serde_json::json!({
+                    "ok": true,
+                    "task_id": state.agent_id,
+                    "status": "cancelled",
+                })),
+                Err(e) => Err((-32000, e.to_string())),
+            }
+        }
+        "ps.list" => {
+            let session_id = params
+                .as_ref()
+                .and_then(|p| p.get("session_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?;
+            let processes: Vec<_> = state
+                .bash_shells
+                .list_running_for_session(session_id)
+                .await
+                .into_iter()
+                .map(|job| {
+                    serde_json::json!({
+                        "task_id": job.id,
+                        "description": job.description,
+                        "command": job.command,
+                        "elapsed_secs": job.elapsed_secs,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "processes": processes }))
+        }
+        "ps.output" => {
+            let task_id = params
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing task_id".into()))?;
+            match state.bash_shells.snapshot_detail(task_id).await {
+                Some(job) => Ok(serde_json::json!({
+                    "task_id": job.id,
+                    "description": job.description,
+                    "command": job.command,
+                    "status": job.status,
+                    "elapsed_secs": job.elapsed_secs,
+                    "exit_code": job.exit_code,
+                    "running": job.running,
+                    "output": job.output,
+                })),
+                None => Err((-32000, format!("Unknown task: {task_id}"))),
+            }
+        }
+        "ps.stop" => {
+            let task_id = params
+                .as_ref()
+                .and_then(|p| p.get("task_id"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| (-32602, "Missing task_id".into()))?;
+            if state.bash_shells.stop(task_id).await {
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "task_id": task_id,
+                    "status": "cancelled",
+                }))
+            } else {
+                Err((-32000, format!("Unknown or finished task: {task_id}")))
+            }
+        }
+        "session.resolve_pending_plan_review" => {
+            let params = params.ok_or_else(|| (-32602, "Missing approval response".into()))?;
+            let session_id = params
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| (-32602, "Missing session_id".into()))?
+                .to_string();
+            let response =
+                serde_json::from_value::<kkagent_protocol::ApprovalResponse>(params.clone())
+                    .map_err(|error| (-32602, format!("Invalid approval response: {error}")))?;
+            let turn_permit = state
+                .turn_locks
+                .try_acquire(&session_id)
+                .await
+                .map_err(|message| (-32001, message))?;
+
+            let mut session = {
+                let mut sessions = state.sessions.lock().await;
+                sessions
+                    .remove(&session_id)
+                    .ok_or_else(|| (-32602, format!("Session not found: {session_id}")))?
+            };
+            let resolution = (|| -> Result<(bool, bool), (i32, String)> {
+                let request = session
+                    .pending_plan_review()
+                    .ok_or_else(|| (-32602, "No persisted plan review for this session".into()))?;
+                if request.approval_id != response.approval_id {
+                    return Err((-32602, "Approval id no longer matches".into()));
+                }
+                let display = request
+                    .tool_input_display
+                    .as_ref()
+                    .and_then(PlanReviewDisplay::from_display_json)
+                    .ok_or_else(|| (-32602, "Persisted plan review is invalid".into()))?;
+                let (output, exit_plan_mode) = resolve_exit_plan_approval(&response, &display);
+                if exit_plan_mode {
+                    session
+                        .set_plan_mode_persisted(false)
+                        .map_err(|error| (-32000, error.to_string()))?;
+                } else {
+                    session
+                        .set_pending_plan_review(None)
+                        .map_err(|error| (-32000, error.to_string()))?;
+                }
+
+                let turn_started = !output.stop_turn
+                    && response.decision != kkagent_protocol::ApprovalDecision::Cancelled;
+                if turn_started {
+                    session.clear_interrupt();
+                    session.add_user_message(format!(
+                        "<system-reminder>\nThe application restarted while ExitPlanMode was awaiting review. The user has now resolved that saved review.\n\n{}\n\nContinue from this result. If revisions were requested, update the plan file and call ExitPlanMode again. If the plan was approved, execute the approved plan.\n</system-reminder>",
+                        output.content
+                    ));
+                    session.begin_turn();
+                }
+                Ok((turn_started, exit_plan_mode))
+            })();
+
+            let (turn_started, plan_mode_changed) = match resolution {
+                Ok(result) => result,
+                Err(error) => {
+                    state.sessions.lock().await.insert(session_id, session);
+                    return Err(error);
+                }
+            };
+            {
+                let db = state.transcript.lock().await;
+                if let Err(error) = persist_session_messages(&db, &mut session) {
+                    tracing::warn!(%error, "failed to persist resumed plan review resolution");
+                }
+            }
+            let plan_mode = session.plan_mode;
+            state
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), session);
+
+            if plan_mode_changed {
+                let data = serde_json::to_value(AgentEvent::PlanModeChanged {
+                    session_id: session_id.clone(),
+                    enabled: plan_mode,
+                })
+                .unwrap_or_default();
+                let _ = rpc_event_tx
+                    .send(Frame::Event {
+                        event: "agent".into(),
+                        scope: None,
+                        data,
+                    })
+                    .await;
+            }
+            if turn_started {
+                spawn_session_agent_turn(state, session_id.clone(), turn_permit).await?;
+            }
+            Ok(serde_json::json!({
+                "ok": true,
+                "session_id": session_id,
+                "turn_started": turn_started,
+                "plan_mode": plan_mode,
+            }))
+        }
+        "approval.respond" => {
+            if let Some(params) = params {
+                if let Ok(response) =
+                    serde_json::from_value::<kkagent_protocol::ApprovalResponse>(params.clone())
+                {
+                    // Prefer session_id from params if present
+                    let session_id = params
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let mut pending = state.pending_tool_approvals.lock().await;
+                    let sid = if let Some(sid) = session_id {
+                        let is_current = pending
+                            .get(&sid)
+                            .is_some_and(|request| request.approval_id == response.approval_id);
+                        if !is_current {
+                            return Err((
+                                -32000,
+                                format!(
+                                    "Approval {} expired or is no longer pending for session {sid}",
+                                    response.approval_id
+                                ),
+                            ));
+                        }
+                        sid
+                    } else {
+                        let mut matches = pending
+                            .iter()
+                            .filter(|(_, request)| request.approval_id == response.approval_id)
+                            .map(|(sid, _)| sid.clone());
+                        let sid = matches.next().ok_or_else(|| {
+                            (
+                                -32000,
+                                format!(
+                                    "Approval {} expired or is no longer pending",
+                                    response.approval_id
+                                ),
+                            )
+                        })?;
+                        if matches.next().is_some() {
+                            return Err((
+                                -32000,
+                                format!(
+                                    "Approval {} is ambiguous without a session_id",
+                                    response.approval_id
+                                ),
+                            ));
+                        }
+                        sid
+                    };
+
+                    let tx = state
+                        .approval_txs
+                        .lock()
+                        .await
+                        .get(&sid)
+                        .cloned()
+                        .ok_or_else(|| {
+                            (-32602, format!("No approval channel for session: {sid}"))
+                        })?;
+                    tx.try_send(response.clone()).map_err(|error| {
+                        (
+                            -32000,
+                            format!("Failed to deliver approval response: {error}"),
+                        )
+                    })?;
+                    pending.remove(&sid);
+                    return Ok(serde_json::json!({"ok": true}));
+                }
+            }
+            Err((-32602, "Invalid approval response".into()))
+        }
+        "question.respond" => {
+            if let Some(params) = params {
+                if let Ok(response) =
+                    serde_json::from_value::<kkagent_protocol::QuestionResponse>(params.clone())
+                {
+                    let session_id = params
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let txs = state.question_txs.lock().await;
+                    if let Some(sid) = session_id {
+                        let tx = txs.get(&sid).ok_or_else(|| {
+                            (-32602, format!("No question channel for session: {sid}"))
+                        })?;
+                        tx.try_send(response.clone()).map_err(|error| {
+                            (
+                                -32000,
+                                format!("Failed to deliver question response: {error}"),
+                            )
+                        })?;
+                        drop(txs);
+                        state
+                            .clear_pending_question(&sid, Some(response.question_id.as_str()))
+                            .await;
+                        return Ok(serde_json::json!({"ok": true}));
+                    }
+                    let mut delivered = 0usize;
+                    for tx in txs.values() {
+                        if tx.try_send(response.clone()).is_ok() {
+                            delivered += 1;
+                        }
+                    }
+                    return if delivered > 0 {
+                        Ok(serde_json::json!({"ok": true, "delivered": delivered}))
+                    } else {
+                        Err((-32000, "No question channel accepted the response".into()))
+                    };
+                }
+            }
+            Err((-32602, "Invalid question response".into()))
+        }
+        _ => Err((-32601, format!("Method not found: {}", method))),
+    }
+}
+
+#[cfg(test)]
+mod http_path_tests {
+    use super::*;
+
+    #[test]
+    fn serializes_plan_resume_payload_with_full_content() {
+        let value = plan_state_json(kkagent_core::SessionPlanState {
+            enabled: true,
+            id: "2026-08-11_resume_plan".into(),
+            path: PathBuf::from("/sessions/s1/agents/main/plans/2026-08-11_resume_plan.md"),
+            content: Some("# Resume plan\n\nFull body.\n".into()),
+        });
+        assert_eq!(value["id"], "2026-08-11_resume_plan");
+        assert_eq!(value["content"], "# Resume plan\n\nFull body.\n");
+        assert!(value["path"]
+            .as_str()
+            .unwrap()
+            .contains("agents/main/plans"));
+    }
+
+    #[test]
+    fn http_new_session_uses_configured_permission_mode() {
+        let mut config = AppConfig::default();
+        assert_eq!(permission_mode_from_config(&config), PermissionMode::Manual);
+        config.default_permission_mode = Some("yolo".into());
+        assert_eq!(permission_mode_from_config(&config), PermissionMode::Yolo);
+        config.default_permission_mode = Some("auto".into());
+        assert_eq!(permission_mode_from_config(&config), PermissionMode::Auto);
+        config.default_permission_mode = Some("not-a-mode".into());
+        assert_eq!(permission_mode_from_config(&config), PermissionMode::Manual);
+    }
+
+    fn text_message(role: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: vec![ChatContent::Text { text: text.into() }],
+            tools: None,
+        }
+    }
+
+    fn tool_use_message(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".into(),
+            content: vec![ChatContent::ToolUse {
+                id: id.into(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "file.rs"}),
+            }],
+            tools: None,
+        }
+    }
+
+    fn tool_result_message(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            content: vec![ChatContent::ToolResult {
+                tool_use_id: id.into(),
+                content: "result".into(),
+                is_error: false,
+            }],
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn disable_sandbox_flag_overrides_only_the_runtime_config() {
+        let cli = Cli::try_parse_from(["ctfer", "--disable-sandbox"]).unwrap();
+        let mut config = AppConfig::default();
+        config.sandbox.mode = "workspace".into();
+
+        apply_runtime_overrides(&cli, &mut config);
+
+        assert!(cli.disable_sandbox);
+        assert_eq!(config.sandbox.mode, "disabled");
+    }
+
+    #[test]
+    fn transcript_pages_keep_tool_calls_inside_complete_turns() {
+        let messages = vec![
+            text_message("user", "first"),
+            tool_use_message("tool-a"),
+            tool_result_message("tool-a"),
+            text_message("assistant", "first done"),
+            text_message("user", "second"),
+            tool_use_message("tool-b"),
+            tool_result_message("tool-b"),
+        ];
+
+        let (recent, oldest, older) = slice_recent_messages(&messages, Some(2));
+        assert_eq!(oldest, 4);
+        assert!(older);
+        assert_eq!(recent.len(), 3);
+        assert!(is_visible_user_turn_start(&recent[0]));
+        assert!(matches!(
+            recent[2].content.first(),
+            Some(ChatContent::ToolResult { tool_use_id, .. }) if tool_use_id == "tool-b"
+        ));
+
+        let (older_page, oldest, older) = slice_message_page(&messages, 4, 2);
+        assert_eq!(oldest, 0);
+        assert!(!older);
+        assert_eq!(older_page.len(), 4);
+        assert!(matches!(
+            older_page[2].content.first(),
+            Some(ChatContent::ToolResult { tool_use_id, .. }) if tool_use_id == "tool-a"
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_turn_lock_reports_active_turns() {
+        let locks = SessionTurnLocks::default();
+        assert!(!locks.is_busy("session").await);
+        assert_eq!(locks.active_count().await, 0);
+        let permit = locks.try_acquire("session").await.unwrap();
+        assert!(locks.is_busy("session").await);
+        assert_eq!(locks.active_count().await, 1);
+        assert_eq!(
+            locks.active_session_ids().await,
+            vec!["session".to_string()]
+        );
+        drop(permit);
+        assert!(!locks.is_busy("session").await);
+        assert_eq!(locks.active_count().await, 0);
+    }
+
+    #[test]
+    fn rpc_event_fanout_keeps_live_subscribers_and_drops_closed() {
+        let mut subscribers = HashMap::new();
+        let (live_tx, mut live_rx) = mpsc::channel(4);
+        let (dead_tx, dead_rx) = mpsc::channel(4);
+        drop(dead_rx);
+        subscribers.insert(1, live_tx);
+        subscribers.insert(2, dead_tx);
+
+        retain_rpc_event_subscribers(
+            &mut subscribers,
+            Frame::Event {
+                event: "agent".into(),
+                scope: None,
+                data: serde_json::json!({"type": "heartbeat"}),
+            },
+        );
+
+        let got = live_rx
+            .try_recv()
+            .expect("live subscriber should get event");
+        assert!(matches!(got, Frame::Event { .. }));
+        assert_eq!(subscribers.len(), 1, "closed subscriber should be pruned");
+        assert!(subscribers.contains_key(&1));
+    }
+
+    #[test]
+    fn btw_rate_limit_backoff_matches_main_agent_policy() {
+        let base = Duration::from_secs(5);
+        assert_eq!(btw_retry_delay(1, None, true, base), Duration::from_secs(5));
+        assert_eq!(
+            btw_retry_delay(2, None, true, base),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            btw_retry_delay(3, None, true, base),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            btw_retry_delay(1, Some(Duration::from_secs(17)), true, base),
+            Duration::from_secs(17)
+        );
+    }
+
+    #[tokio::test]
+    async fn btw_retry_wait_publishes_countdown_event() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let cancel = AtomicBool::new(false);
+        let publish = |frame: Frame| {
+            let _ = tx.try_send(frame);
+        };
+
+        assert!(
+            wait_for_btw_retry(
+                &publish,
+                "session",
+                "btw-agent",
+                1,
+                "HTTP 429 Too Many Requests",
+                Duration::ZERO,
+                &cancel,
+            )
+            .await
+        );
+
+        let Frame::Event { data, .. } = rx.recv().await.unwrap() else {
+            panic!("expected retry event");
+        };
+        let event: AgentEvent = serde_json::from_value(data).unwrap();
+        assert!(matches!(
+            event,
+            AgentEvent::BtwRetry {
+                retry_number: 1,
+                remaining_seconds: 0,
+                initial: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn active_btw_handle_survives_session_leaving_idle_map() {
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-btw-active-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "btw-active".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("main turn is running".into());
+
+        let active = ActiveBtwSession::from_session(&session);
+        drop(session);
+
+        assert!(active.service.try_begin());
+        let agent_id = active.service.start(&active.agents);
+        let messages = active
+            .history
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let history = active.service.context_snapshot(&messages);
+        assert_eq!(
+            active.service.active_agent_id().as_deref(),
+            Some(agent_id.as_str())
+        );
+        assert_eq!(history.len(), 1);
+        assert!(active.service.is_busy());
+
+        active.service.clear(&active.agents);
+        assert!(!active.service.is_busy());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn disable_sandbox_flag_rejects_remote_connections() {
+        let cli = Cli::try_parse_from([
+            "ctfer",
+            "--disable-sandbox",
+            "--connect",
+            "/tmp/kkagent.sock",
+        ])
+        .unwrap();
+
+        let error = validate_runtime_cli(&cli).unwrap_err();
+        assert!(error.to_string().contains("configure the remote server"));
+    }
+
+    fn config_with_root(root: &std::path::Path) -> AppConfig {
+        AppConfig {
+            trusted_workspaces: vec![root.display().to_string()],
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn resume_working_dir_is_scoped_to_the_requested_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("kkagent-resume-workspace-{}", uuid::Uuid::new_v4()));
+        let other =
+            std::env::temp_dir().join(format!("kkagent-resume-workspace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+
+        assert_eq!(
+            resolve_resume_working_dir(root.to_str().unwrap(), Some(&root)).unwrap(),
+            canonical_root
+        );
+        assert_eq!(
+            resolve_resume_working_dir(".", Some(&root)).unwrap(),
+            canonical_root
+        );
+
+        let error = resolve_resume_working_dir(root.to_str().unwrap(), Some(&other)).unwrap_err();
+        assert!(error.contains("different directory"));
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(other).unwrap();
+    }
+
+    #[test]
+    fn auto_resume_precheck_detects_directory_mismatch() {
+        let home_dir =
+            std::env::temp_dir().join(format!("kkagent-resume-home-{}", uuid::Uuid::new_v4()));
+        let other_dir =
+            std::env::temp_dir().join(format!("kkagent-resume-other-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let session_id = format!("sess-{}", uuid::Uuid::new_v4().simple());
+
+        let db = TranscriptDb::open_default().unwrap();
+        db.create_session(&session_id, "unknown", home_dir.to_str().unwrap())
+            .unwrap();
+
+        // Same directory (even before canonicalization) is still resumable.
+        assert!(!session_resume_unavailable_in(&session_id, &home_dir));
+        // A different directory is silently skipped instead of erroring.
+        assert!(session_resume_unavailable_in(&session_id, &other_dir));
+        // Unknown sessions fall back to the normal resume path (no pre-check).
+        assert!(!session_resume_unavailable_in(
+            "sess-does-not-exist",
+            &other_dir
+        ));
+
+        std::fs::remove_dir_all(home_dir).unwrap();
+        std::fs::remove_dir_all(other_dir).unwrap();
+    }
+
+    #[test]
+    fn transcript_policy_fails_closed_unless_degraded_mode_is_explicit() {
+        let directory =
+            std::env::temp_dir().join(format!("kkagent-db-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let error = match open_transcript_with_policy(&directory, false) {
+            Ok(_) => panic!("directory path unexpectedly opened as a transcript database"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cannot open durable transcript DB"));
+        let (_, durable, degraded_error) = open_transcript_with_policy(&directory, true).unwrap();
+        assert!(!durable);
+        assert!(degraded_error.is_some());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_paths_outside_trusted_workspace() {
+        let root = std::env::temp_dir().join(format!("kkagent-http-root-{}", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("kkagent-http-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        let err = resolve_http_fs_path(
+            &config_with_root(&root),
+            &outside.join("secret.txt").display().to_string(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("outside trusted workspaces"));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn allows_new_files_below_trusted_workspace() {
+        let root = std::env::temp_dir().join(format!("kkagent-http-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let expected = root.join("new").join("file.txt");
+        let actual = resolve_http_fs_path(
+            &config_with_root(&root),
+            &expected.display().to_string(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            actual,
+            std::fs::canonicalize(&root)
+                .unwrap()
+                .join("new")
+                .join("file.txt")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serializes_turns_per_session_but_not_across_sessions() {
+        let locks = SessionTurnLocks::default();
+        let first = locks.try_acquire("session-a").await.unwrap();
+        assert!(locks.try_acquire("session-a").await.is_err());
+        let other = locks.try_acquire("session-b").await.unwrap();
+        drop(first);
+        assert!(locks.try_acquire("session-a").await.is_ok());
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn grace_acquire_waits_for_permit_release() {
+        let locks = SessionTurnLocks::default();
+        let permit = locks.try_acquire("session-a").await.unwrap();
+        assert!(
+            locks
+                .try_acquire_with_grace("session-a", Duration::from_millis(10))
+                .await
+                .is_err(),
+            "grace acquire must still fail while another turn holds the permit"
+        );
+        drop(permit);
+        assert!(locks.try_acquire("session-a").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn grace_acquire_acquires_shortly_after_idle_event() {
+        let locks = SessionTurnLocks::default();
+        let permit = locks.try_acquire("session-a").await.unwrap();
+        // Simulate a turn that publishes idle, then releases its permit shortly
+        // after (teardown/persistence window).
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(permit);
+        });
+        let acquired = locks
+            .try_acquire_with_grace("session-a", Duration::from_secs(2))
+            .await;
+        assert!(
+            acquired.is_ok(),
+            "grace acquire should succeed once the permit is released within the grace window"
+        );
+    }
+
+    #[test]
+    fn compacted_in_memory_history_atomically_replaces_transcript() {
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-persist-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let db = TranscriptDb::open_in_memory().unwrap();
+        db.create_session("persist-test", "model", workspace.to_str().unwrap())
+            .unwrap();
+        let mut session = Session::new(
+            "persist-test".into(),
+            workspace.clone(),
+            PermissionMode::Auto,
+            "model".into(),
+        );
+        for index in 0..6 {
+            session.add_user_message(format!("message {index}"));
+        }
+        persist_session_messages(&db, &mut session).unwrap();
+        assert_eq!(db.load_messages("persist-test").unwrap().len(), 6);
+
+        kkagent_core::compact_messages(&mut session.messages, 2, "durable digest");
+        session.transcript_rewrite_required = true;
+        persist_session_messages(&db, &mut session).unwrap();
+
+        let records = db.load_messages("persist-test").unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records[0].content_json.contains("durable digest"));
+        assert!(records[1].content_json.contains("message 4"));
+        assert!(!session.transcript_rewrite_required);
+        assert_eq!(session.persisted_message_count, 3);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn should_idle_shutdown_decision_matrix() {
+        let timeout = Duration::from_secs(30);
+        let idle = Duration::from_secs(31);
+        let fresh = Duration::from_secs(5);
+        // Idle timeout disabled -> never shut down.
+        assert!(!should_idle_shutdown(Duration::ZERO, idle, false, false));
+        // Quiet and past the deadline -> shut down.
+        assert!(should_idle_shutdown(timeout, idle, false, false));
+        // Not yet idle -> stay up.
+        assert!(!should_idle_shutdown(timeout, fresh, false, false));
+        // Exactly at the boundary counts as still active (strictly-greater check).
+        assert!(!should_idle_shutdown(timeout, timeout, false, false));
+        // Active turns or connected clients keep the server alive.
+        assert!(!should_idle_shutdown(timeout, idle, true, false));
+        assert!(!should_idle_shutdown(timeout, idle, false, true));
+    }
+}
+
+#[cfg(test)]
+mod runtime_http_tests {
+    use super::*;
+    use kkagent_rpc::HttpBackend;
+
+    fn manager() -> HttpServerManager {
+        HttpServerManager::new(
+            kkagent_rpc::HttpSecurityOptions::default(),
+            kkagent_rpc::DurableHttpStore::open_in_memory().unwrap(),
+        )
+    }
+
+    fn manager_with_token(scoped_tokens: &[(&str, &[&str])]) -> HttpServerManager {
+        let mut security = kkagent_rpc::HttpSecurityOptions::default();
+        for (token, scopes) in scoped_tokens {
+            security.scoped_tokens.insert(
+                (*token).to_string(),
+                scopes.iter().map(|s| s.to_string()).collect(),
+            );
+        }
+        HttpServerManager::new(
+            security,
+            kkagent_rpc::DurableHttpStore::open_in_memory().unwrap(),
+        )
+    }
+
+    fn memory_backend() -> Arc<dyn kkagent_rpc::HttpBackend> {
+        Arc::new(kkagent_rpc::MemoryBackend::default())
+    }
+
+    #[tokio::test]
+    async fn status_reports_not_running_initially() {
+        let manager = manager();
+        let status = manager.status().await;
+        assert_eq!(status["running"], serde_json::json!(false));
+        assert_eq!(status["address"], serde_json::Value::Null);
+        assert_eq!(status["token_set"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn stop_without_running_server_errors() {
+        let manager = manager();
+        let error = manager.stop().await.expect_err("stop should fail");
+        assert_eq!(error, "HTTP server is not running");
+    }
+
+    #[tokio::test]
+    async fn start_returns_bound_address_and_token() {
+        let manager = manager();
+        let info = manager
+            .start(
+                memory_backend(),
+                "127.0.0.1:0",
+                Some("an-explicit-token".into()),
+            )
+            .await
+            .unwrap()
+            .expect("first start should succeed");
+        assert!(info.address.contains(':'), "actual bound address returned");
+        assert_eq!(info.token.as_deref(), Some("an-explicit-token"));
+        let status = manager.status().await;
+        assert_eq!(status["running"], serde_json::json!(true));
+        assert_eq!(status["address"], serde_json::json!(info.address));
+        assert_eq!(status["token_set"], serde_json::json!(true));
+
+        let address = manager.stop().await.unwrap();
+        assert_eq!(address, info.address);
+        let status = manager.status().await;
+        assert_eq!(status["running"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn second_start_is_rejected_while_running() {
+        let manager = manager();
+        manager
+            .start(memory_backend(), "127.0.0.1:0", None)
+            .await
+            .unwrap()
+            .expect("first start succeeds");
+        let second = manager
+            .start(memory_backend(), "127.0.0.1:0", Some("t2".into()))
+            .await
+            .unwrap();
+        assert!(second.is_none(), "second start returns None while running");
+    }
+
+    #[tokio::test]
+    async fn non_loopback_without_token_is_rejected() {
+        let manager = manager();
+        let error = manager
+            .start(memory_backend(), "0.0.0.0:0", None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("token"),
+            "bind must reject non-loopback without token: {error}"
+        );
+        // Still not running after failed start.
+        assert_eq!(manager.status().await["running"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn non_loopback_with_token_is_allowed() {
+        let manager = manager();
+        let info = manager
+            .start(memory_backend(), "0.0.0.0:0", Some("secret-token".into()))
+            .await
+            .unwrap()
+            .expect("non-loopback with token should start");
+        assert_eq!(info.token.as_deref(), Some("secret-token"));
+        manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn released_port_is_rebindable_after_stop() {
+        let manager = manager();
+        let first = manager
+            .start(memory_backend(), "127.0.0.1:0", None)
+            .await
+            .unwrap()
+            .unwrap();
+        manager.stop().await.unwrap();
+        // The port freed by stop must be immediately reusable.
+        let second = manager
+            .start(memory_backend(), &first.address, Some("tok".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.address, first.address);
+        manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_server_rejects_connections() {
+        let manager = manager();
+        let info = manager
+            .start(memory_backend(), "127.0.0.1:0", Some("tok".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let token = info.token.clone().unwrap();
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/api/v1/health", info.address);
+        // While running the endpoint answers (any status; auth may 401).
+        let _ = client.get(&url).send().await.unwrap();
+        // The token is accepted.
+        let response = client
+            .get(&url)
+            .query(&[("token", token)])
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        manager.stop().await.unwrap();
+        // After stop the port is closed.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let result = client.get(&url).send().await;
+        assert!(
+            result.is_err(),
+            "connection to {} must fail after stop",
+            info.address
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_http_start_requires_token_for_non_loopback() {
+        let state = test_server_state().await;
+        let error = handle_rpc_call(
+            state.clone(),
+            "runtime.http.start",
+            Some(serde_json::json!({ "addr": "0.0.0.0:0" })),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("non-loopback without token must fail");
+        assert_eq!(error.0, -32000);
+        assert!(error.1.contains("token"));
+    }
+
+    #[tokio::test]
+    async fn runtime_http_lifecycle_through_rpc() {
+        let state = test_server_state().await;
+
+        // status: not running
+        let status = handle_rpc_call(state.clone(), "runtime.http.status", None, rpc_event_sink())
+            .await
+            .unwrap();
+        assert_eq!(status["running"], serde_json::json!(false));
+
+        // start on an ephemeral loopback port
+        let started = handle_rpc_call(
+            state.clone(),
+            "runtime.http.start",
+            Some(serde_json::json!({ "addr": "127.0.0.1:0" })),
+            rpc_event_sink(),
+        )
+        .await
+        .unwrap();
+        let address = started["address"].as_str().unwrap().to_string();
+        let token = started["token"].as_str().unwrap().to_string();
+        assert!(address.contains(':'));
+        assert!(token.len() >= 32, "generated token is returned");
+
+        // duplicate start is rejected
+        let error = handle_rpc_call(
+            state.clone(),
+            "runtime.http.start",
+            Some(serde_json::json!({ "addr": "127.0.0.1:0" })),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("duplicate start must fail");
+        assert_eq!(error.0, -32000);
+        assert!(error.1.contains("already running"));
+
+        // status reports the running server
+        let status = handle_rpc_call(state.clone(), "runtime.http.status", None, rpc_event_sink())
+            .await
+            .unwrap();
+        assert_eq!(status["running"], serde_json::json!(true));
+        assert_eq!(status["address"], serde_json::json!(address));
+        assert_eq!(status["token_set"], serde_json::json!(true));
+
+        // the UI endpoint is reachable with the token
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{address}/ui"))
+            .query(&[("token", token)])
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let body = response.text().await.unwrap();
+        assert!(
+            body.trim_start().starts_with("<!DOCTYPE html>"),
+            "web UI index should be served, got: {}",
+            &body[..body.len().min(80)]
+        );
+
+        // stop
+        let stopped = handle_rpc_call(state.clone(), "runtime.http.stop", None, rpc_event_sink())
+            .await
+            .unwrap();
+        assert_eq!(stopped["stopped"], serde_json::json!(true));
+
+        // stop again errors
+        let error = handle_rpc_call(state.clone(), "runtime.http.stop", None, rpc_event_sink())
+            .await
+            .expect_err("second stop must fail");
+        assert_eq!(error.0, -32000);
+
+        // status back to not running
+        let status = handle_rpc_call(state.clone(), "runtime.http.status", None, rpc_event_sink())
+            .await
+            .unwrap();
+        assert_eq!(status["running"], serde_json::json!(false));
+
+        state.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_http_start_missing_addr_is_invalid_params() {
+        let state = test_server_state().await;
+        let error = handle_rpc_call(
+            state.clone(),
+            "runtime.http.start",
+            Some(serde_json::json!({})),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("missing addr must fail");
+        assert_eq!(error.0, -32602);
+    }
+
+    #[tokio::test]
+    async fn kk_server_http_attaches_to_already_running_server() {
+        // A real server listening on a temp UDS socket (short path: macOS
+        // rejects socket paths longer than SUN_LEN).
+        let socket_dir = std::env::temp_dir().join(format!(
+            "kk-att-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("s.sock");
+        let listener = kkagent_rpc::transport::uds::bind_uds(&socket_path).unwrap();
+
+        let state = test_server_state().await;
+        let accept_state = state.clone();
+        let server_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let state = accept_state.clone();
+                tokio::spawn(async move {
+                    run_server_handler_with_state(stream, state).await;
+                });
+            }
+        });
+
+        // ...then `kk server --http` must attach via RPC instead of failing.
+        let stream = kkagent_rpc::transport::uds::try_connect_uds(&socket_path)
+            .await
+            .unwrap();
+        attach_http_to_running_server(stream, "127.0.0.1:0", None)
+            .await
+            .unwrap();
+
+        // The HTTP server really runs on the already-running server now.
+        let status = handle_rpc_call(state.clone(), "runtime.http.status", None, rpc_event_sink())
+            .await
+            .unwrap();
+        assert_eq!(status["running"], serde_json::json!(true));
+        handle_rpc_call(state.clone(), "runtime.http.stop", None, rpc_event_sink())
+            .await
+            .unwrap();
+
+        server_task.abort();
+        state.shutdown().await;
+        let _ = std::fs::remove_dir_all(&socket_dir);
+    }
+
+    /// Minimal ServerState for RPC-level tests: default config, no plugins/MCP.
+    /// Uses a unique temp transcript DB per call so parallel tests never share
+    /// a SQLite schema (SQLITE_SCHEMA race) nor touch the user's real
+    /// `~/.kkagent/transcripts.db`.
+    pub(crate) async fn test_server_state() -> Arc<ServerState> {
+        let config = Arc::new(AppConfig::default());
+        let (shutdown_tx, _) = watch::channel(false);
+        let temp_db_dir =
+            std::env::temp_dir().join(format!("kkagent-test-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_db_dir).unwrap();
+        let state = build_server_state_with_shutdown(
+            config,
+            PathBuf::from("/tmp/kkagent-test-config.toml"),
+            shutdown_tx,
+            kkagent_rpc::HttpSecurityOptions::default(),
+            Some(temp_db_dir.join("transcripts.db")),
+        )
+        .await
+        .unwrap();
+        state
+    }
+
+    pub(crate) fn rpc_event_sink() -> mpsc::Sender<Frame> {
+        let (tx, _rx) = mpsc::channel(16);
+        tx
+    }
+
+    #[tokio::test]
+    async fn native_fangida_tools_are_available_in_host_turn_registry() {
+        let state = test_server_state().await;
+        let (events, _receiver) = mpsc::channel(16);
+        let tools = build_turn_tool_registry(&state, events, Vec::new(), "fangida-host-test").await;
+        for name in kkagent_fangida::TOOL_NAMES {
+            assert!(tools.get(name).is_some(), "host registry lost {name}");
+        }
+        assert!(tools.get("Read").is_some());
+        assert!(tools.get("Bash").is_some());
+        assert!(!tools.get("FangidaSave").unwrap().read_only());
+        assert!(!tools.get("FangidaAnnotate").unwrap().default_approve());
+    }
+
+    #[test]
+    fn native_fangida_socket_is_separate_and_explicit_listen_is_preserved() {
+        let original = kkagent_config::default_server_socket_path();
+        assert_eq!(runtime_socket_path(false), original);
+        assert_eq!(runtime_socket_path(true).parent(), original.parent());
+        assert_ne!(runtime_socket_path(true), original);
+        assert_eq!(
+            runtime_socket_path(true).file_name().unwrap(),
+            "fangida-agent.sock"
+        );
+        assert_eq!(
+            resolve_listen_path(Some("custom.sock".into())),
+            PathBuf::from("custom.sock")
+        );
+    }
+
+    #[test]
+    fn session_list_item_falls_back_to_transcript_title() {
+        let summary = kkagent_core::session::store::SessionSummary {
+            id: "title-fallback".into(),
+            session_dir: "/tmp/title-fallback".into(),
+            work_dir: "/tmp".into(),
+            title: None,
+            is_custom_title: false,
+            archived: false,
+            last_prompt: Some("first prompt".into()),
+            first_prompt: Some("first prompt".into()),
+            created_at: 0,
+            updated_at: 0,
+            forked_from: None,
+        };
+        let record = kkagent_core::transcript::SessionRecord {
+            session_id: "title-fallback".into(),
+            title: Some("Generated title".into()),
+            model: "model".into(),
+            fallback_model: None,
+            working_dir: "/tmp".into(),
+            created_at: "1970-01-01T00:00:00Z".into(),
+            updated_at: "1970-01-01T00:00:00Z".into(),
+            message_count: 1,
+            is_archived: false,
+        };
+
+        let item = http_session_list_item(summary, Some(&record));
+        assert_eq!(item["title"], "Generated title");
+    }
+
+    #[test]
+    fn http_message_starts_fresh_turn_after_interrupt() {
+        let mut session = Session::new(
+            "http-after-interrupt".into(),
+            std::env::temp_dir(),
+            PermissionMode::Manual,
+            "old-model".into(),
+        );
+        session.request_interrupt();
+        assert!(session.is_interrupted());
+
+        let message_count =
+            prepare_http_user_message(&mut session, "continue with the newly selected model", &[])
+                .expect("the next HTTP message should be accepted");
+
+        assert!(!session.is_interrupted());
+        assert_eq!(message_count, 1);
+        assert_eq!(session.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_response_requires_the_matching_pending_request() {
+        let state = test_server_state().await;
+        let params = serde_json::json!({
+            "session_id": "approval-session",
+            "approval_id": "approval-1",
+            "decision": "approved"
+        });
+
+        let error = handle_rpc_call(
+            state.clone(),
+            "approval.respond",
+            Some(params.clone()),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("an orphaned approval response must be rejected");
+        assert_eq!(error.0, -32000);
+        assert!(error.1.contains("expired"));
+
+        let (approval_tx, mut approval_rx) = mpsc::channel(1);
+        state
+            .approval_txs
+            .lock()
+            .await
+            .insert("approval-session".into(), approval_tx);
+        state
+            .remember_pending_tool_approval(kkagent_protocol::ApprovalRequest {
+                approval_id: "approval-1".into(),
+                session_id: "approval-session".into(),
+                tool_call_id: "tool-call-1".into(),
+                tool_name: "Bash".into(),
+                action: "run command".into(),
+                tool_input_display: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await;
+
+        let result = handle_rpc_call(
+            state.clone(),
+            "approval.respond",
+            Some(params.clone()),
+            rpc_event_sink(),
+        )
+        .await
+        .expect("the matching pending approval should be delivered");
+        assert_eq!(result["ok"], serde_json::json!(true));
+        let response = approval_rx
+            .recv()
+            .await
+            .expect("approval response delivered");
+        assert_eq!(response.approval_id, "approval-1");
+        assert_eq!(
+            response.decision,
+            kkagent_protocol::ApprovalDecision::Approved
+        );
+        assert!(state
+            .pending_tool_approval_for_session("approval-session")
+            .await
+            .is_none());
+
+        let error = handle_rpc_call(
+            state.clone(),
+            "approval.respond",
+            Some(params),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("a duplicate approval response must be rejected");
+        assert!(error.1.contains("expired"));
+        state.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn interrupt_then_next_turn_approval_reaches_the_current_waiter() {
+        let state = test_server_state().await;
+        let session_id = "approval-after-interrupt";
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-approval-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = Session::new(
+            session_id.into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "test-model".into(),
+        );
+        state
+            .interrupt_flags
+            .lock()
+            .await
+            .insert(session_id.into(), session.interrupted.clone());
+        state
+            .approval_txs
+            .lock()
+            .await
+            .insert(session_id.into(), session.approval_tx.clone());
+        state
+            .question_txs
+            .lock()
+            .await
+            .insert(session_id.into(), session.question_tx.clone());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.into(), session);
+
+        handle_rpc_call(
+            state.clone(),
+            "session.interrupt",
+            Some(serde_json::json!({"session_id": session_id})),
+            rpc_event_sink(),
+        )
+        .await
+        .expect("interrupt should succeed");
+
+        let mut session = state
+            .sessions
+            .lock()
+            .await
+            .remove(session_id)
+            .expect("session remains available after interrupt");
+        assert!(session.is_interrupted());
+        session.clear_interrupt();
+
+        state
+            .remember_pending_tool_approval(kkagent_protocol::ApprovalRequest {
+                approval_id: "next-turn-approval".into(),
+                session_id: session_id.into(),
+                tool_call_id: "bash-call".into(),
+                tool_name: "Bash".into(),
+                action: "run command".into(),
+                tool_input_display: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await;
+        handle_rpc_call(
+            state.clone(),
+            "approval.respond",
+            Some(serde_json::json!({
+                "session_id": session_id,
+                "approval_id": "next-turn-approval",
+                "decision": "approved"
+            })),
+            rpc_event_sink(),
+        )
+        .await
+        .expect("next-turn approval should be accepted");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            session.wait_approval("next-turn-approval"),
+        )
+        .await
+        .expect("next-turn waiter should receive its approval");
+        assert_eq!(response.approval_id, "next-turn-approval");
+        assert_eq!(
+            response.decision,
+            kkagent_protocol::ApprovalDecision::Approved
+        );
+
+        state.shutdown().await;
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[tokio::test]
+    async fn scoped_tokens_authorize_requests() {
+        let manager = manager_with_token(&[("read-only", &["read"])]);
+        let info = manager
+            .start(memory_backend(), "127.0.0.1:0", Some("admin-token".into()))
+            .await
+            .unwrap()
+            .unwrap();
+        let client = reqwest::Client::new();
+        // Missing token -> 401
+        let response = client
+            .get(format!("http://{}/api/v1/sessions", info.address))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        // Scoped token with read access -> 200
+        let response = client
+            .get(format!("http://{}/api/v1/sessions", info.address))
+            .header("authorization", "Bearer read-only")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        manager.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_session_keeps_history_while_turn_owns_session() {
+        let state = test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-inflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "inflight-session".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("keep the earlier turns".into());
+        session.messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: vec![
+                ChatContent::Thinking {
+                    thinking: "old thought".into(),
+                },
+                ChatContent::Text {
+                    text: "done".into(),
+                },
+            ],
+            tools: None,
+        });
+        session.add_user_message("current prompt".into());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
+
+        let taken = state
+            .checkout_session("inflight-session")
+            .await
+            .expect("session should check out");
+        assert!(state
+            .sessions
+            .lock()
+            .await
+            .get("inflight-session")
+            .is_none());
+
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let got = backend
+            .get_session("inflight-session")
+            .await
+            .expect("in-flight session should remain readable");
+        let messages = got["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["content"][0]["text"], "keep the earlier turns");
+        assert_eq!(messages[1]["content"][0]["thinking"], "old thought");
+        assert_eq!(messages[2]["content"][0]["text"], "current prompt");
+
+        state.reconnect_ui.lock().await.insert(
+            "inflight-session".into(),
+            SessionReconnectUi {
+                status: Some(SessionStatus::Thinking),
+                thinking_text: "live thought".into(),
+                assistant_text: "partial answer".into(),
+                llm_retry: None,
+                partial_messages: Vec::new(),
+            },
+        );
+        let live = backend
+            .get_session("inflight-session")
+            .await
+            .expect("live ui should attach");
+        assert_eq!(live["live_ui"]["thinking_text"], "live thought");
+        assert_eq!(live["live_ui"]["assistant_text"], "partial answer");
+
+        state.checkin_session("inflight-session", taken).await;
+        assert!(state
+            .sessions
+            .lock()
+            .await
+            .get("inflight-session")
+            .is_some());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_session_flushes_pending_deltas_during_active_turn() {
+        let state = test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-resume-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "resume-session".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("current prompt".into());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
+
+        let taken = state
+            .checkout_session("resume-session")
+            .await
+            .expect("session should check out");
+
+        // Hold the turn lock so get_session treats the session as mid-turn.
+        let _permit = state
+            .turn_locks
+            .try_acquire("resume-session")
+            .await
+            .expect("turn lock should be free");
+
+        // Live streaming phase: thinking/text deltas arrived, but no ToolCall
+        // yet, so nothing was committed to partial_messages.
+        state.reconnect_ui.lock().await.insert(
+            "resume-session".into(),
+            SessionReconnectUi {
+                status: Some(SessionStatus::Thinking),
+                thinking_text: "in-flight thought".into(),
+                assistant_text: "partial answer".into(),
+                llm_retry: None,
+                partial_messages: Vec::new(),
+            },
+        );
+
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let got = backend
+            .get_session("resume-session")
+            .await
+            .expect("in-flight session should remain readable");
+        let messages = got["messages"].as_array().expect("messages array");
+        // The flushed assistant message must survive the reconnect merge.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"][0]["text"], "current prompt");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["thinking"], "in-flight thought");
+        assert_eq!(messages[1]["content"][1]["text"], "partial answer");
+
+        state.checkin_session("resume-session", taken).await;
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_session_keeps_tool_steps_between_calls_during_active_turn() {
+        let state = test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-resume2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "resume-tools".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("run tools".into());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
+
+        let taken = state
+            .checkout_session("resume-tools")
+            .await
+            .expect("session should check out");
+        let _permit = state
+            .turn_locks
+            .try_acquire("resume-tools")
+            .await
+            .expect("turn lock should be free");
+
+        // The session was checked out mid-turn and no reconnect_ui entry exists
+        // yet (fresh server restart or TurnEnd cleanup raced with late tool
+        // events). Tool events must create the entry instead of being dropped.
+        state.reconnect_ui.lock().await.remove("resume-tools");
+        let event_state = state.clone();
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::ThinkingDelta {
+                session_id: "resume-tools".into(),
+                text: "step one thought".into(),
+            })
+            .await;
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::MessageDelta {
+                session_id: "resume-tools".into(),
+                text: "step one answer".into(),
+            })
+            .await;
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::ToolCall {
+                session_id: "resume-tools".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            })
+            .await;
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::ThinkingDelta {
+                session_id: "resume-tools".into(),
+                text: "step two thought".into(),
+            })
+            .await;
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::MessageDelta {
+                session_id: "resume-tools".into(),
+                text: "step two answer".into(),
+            })
+            .await;
+        event_state
+            .note_agent_event_for_resume(&AgentEvent::ToolResult {
+                session_id: "resume-tools".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                output: "file list".into(),
+                is_error: false,
+            })
+            .await;
+
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let got = backend
+            .get_session("resume-tools")
+            .await
+            .expect("in-flight session should remain readable");
+        let messages = got["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["content"][0]["text"], "run tools");
+        assert_eq!(messages[1]["content"][0]["thinking"], "step one thought");
+        assert_eq!(messages[1]["content"][1]["text"], "step one answer");
+        assert_eq!(messages[1]["content"][2]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][2]["id"], "call-1");
+        assert_eq!(
+            messages[2]["content"][0]["type"], "tool_result",
+            "tool result must survive after its reconnect_ui entry was recreated"
+        );
+        assert_eq!(messages[2]["content"][0]["tool_use_id"], "call-1");
+        assert_eq!(messages[3]["content"][0]["thinking"], "step two thought");
+        assert_eq!(messages[3]["content"][1]["text"], "step two answer");
+
+        state.checkin_session("resume-tools", taken).await;
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_session_keeps_live_config_todos_and_status_while_checked_out() {
+        let state = test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-resume-todos-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "resume-todos".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("update todos".into());
+        state
+            .model_aliases
+            .lock()
+            .await
+            .insert(session.id.clone(), session.model_alias.clone());
+        state
+            .permission_modes
+            .lock()
+            .await
+            .insert(session.id.clone(), session.permission_mode.clone());
+        state
+            .plan_mode_requests
+            .lock()
+            .await
+            .insert(session.id.clone(), session.plan_mode_requested.clone());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
+
+        let taken = state
+            .checkout_session("resume-todos")
+            .await
+            .expect("session should check out");
+        let _permit = state
+            .turn_locks
+            .try_acquire("resume-todos")
+            .await
+            .expect("turn lock should be free");
+        *state.model_aliases.lock().await["resume-todos"]
+            .lock()
+            .unwrap() = "switched-model".into();
+        *state.permission_modes.lock().await["resume-todos"]
+            .lock()
+            .unwrap() = PermissionMode::Yolo;
+        state.plan_mode_requests.lock().await["resume-todos"]
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+            .note_agent_event_for_resume(&AgentEvent::TodoUpdated {
+                session_id: "resume-todos".into(),
+                items: vec![kkagent_protocol::TodoItemEvent {
+                    id: "1".into(),
+                    content: "Preserve current list".into(),
+                    status: "in_progress".into(),
+                }],
+            })
+            .await;
+
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let got = backend
+            .get_session("resume-todos")
+            .await
+            .expect("checked-out session should remain readable");
+        assert_eq!(got["status"], "thinking");
+        assert_eq!(got["model"], "switched-model");
+        assert_eq!(got["permission_mode"], "yolo");
+        assert_eq!(got["plan_mode"], true);
+        assert_eq!(got["todos"][0]["content"], "Preserve current list");
+        assert_eq!(got["todos"][0]["status"], "in_progress");
+
+        state.checkin_session("resume-todos", taken).await;
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn turn_end_keeps_transcript_until_checkin() {
+        let state = test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-resume3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut session = Session::new(
+            "resume-race".into(),
+            workspace.clone(),
+            PermissionMode::Manual,
+            "model".into(),
+        );
+        session.add_user_message("race prompt".into());
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session);
+
+        let taken = state
+            .checkout_session("resume-race")
+            .await
+            .expect("session should check out");
+        let _permit = state
+            .turn_locks
+            .try_acquire("resume-race")
+            .await
+            .expect("turn lock should be free");
+
+        state
+            .note_agent_event_for_resume(&AgentEvent::ThinkingDelta {
+                session_id: "resume-race".into(),
+                text: "deep thought".into(),
+            })
+            .await;
+        state
+            .note_agent_event_for_resume(&AgentEvent::ToolCall {
+                session_id: "resume-race".into(),
+                tool_call_id: "call-9".into(),
+                tool_name: "read".into(),
+                input: serde_json::json!({"path": "x"}),
+            })
+            .await;
+        state
+            .note_agent_event_for_resume(&AgentEvent::ToolResult {
+                session_id: "resume-race".into(),
+                tool_call_id: "call-9".into(),
+                tool_name: "read".into(),
+                output: "data".into(),
+                is_error: false,
+            })
+            .await;
+
+        // The forwarding task observes TurnEnd before the runner finishes
+        // persisting and checking the session back in. This is the exact
+        // window where the whole turn used to vanish from `get_session`.
+        state
+            .note_agent_event_for_resume(&AgentEvent::TurnEnd {
+                session_id: "resume-race".into(),
+            })
+            .await;
+
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let got = backend
+            .get_session("resume-race")
+            .await
+            .expect("session should remain readable mid-checkin");
+        let messages = got["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            3,
+            "turn output must survive the TurnEnd -> checkin window"
+        );
+        assert_eq!(messages[1]["content"][0]["thinking"], "deep thought");
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+
+        // Once checkin restores the persisted history, the tail is dropped.
+        state.checkin_session("resume-race", taken).await;
+        assert!(state.reconnect_ui.lock().await.get("resume-race").is_none());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_config_exposes_default_permission_mode() {
+        let state = test_server_state().await;
+        let mut config = (*state.config()).clone();
+        config.default_permission_mode = Some("yolo".into());
+        state.replace_config(Arc::new(config));
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let value = backend.get_config().await;
+        assert_eq!(value["default_permission_mode"], "yolo");
+    }
+
+    fn msg_record(role: &str, content_json: &str) -> kkagent_core::transcript::MessageRecord {
+        kkagent_core::transcript::MessageRecord {
+            id: 0,
+            session_id: String::new(),
+            role: role.into(),
+            content_json: content_json.into(),
+            token_count: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn repair_orphan_tool_uses_adds_error_result() {
+        let records = vec![
+            msg_record("user", r#"[{"type":"text","text":"go"}]"#),
+            msg_record(
+                "assistant",
+                r#"[{"type":"text","text":"calling tool"},{"type":"tool_use","id":"call-1","name":"bash","input":{}}]"#,
+            ),
+        ];
+        let messages = messages_from_records(&records);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, "user");
+        let result = &messages[2].content[0];
+        match result {
+            ChatContent::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } => {
+                assert_eq!(tool_use_id, "call-1");
+                assert!(*is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_orphan_tool_uses_skips_complete_transcript() {
+        let records = vec![
+            msg_record("user", r#"[{"type":"text","text":"go"}]"#),
+            msg_record("assistant", r#"[{"type":"text","text":"done"}]"#),
+        ];
+        let messages = messages_from_records(&records);
+        assert_eq!(
+            messages.len(),
+            2,
+            "no repair needed for complete transcript"
+        );
+    }
+
+    #[test]
+    fn repair_orphan_tool_uses_skips_answered_tool_use() {
+        let records = vec![
+            msg_record(
+                "assistant",
+                r#"[{"type":"tool_use","id":"call-1","name":"bash","input":{}}]"#,
+            ),
+            msg_record(
+                "user",
+                r#"[{"type":"tool_result","tool_use_id":"call-1","content":"ok","is_error":false}]"#,
+            ),
+            msg_record("assistant", r#"[{"type":"text","text":"finalized"}]"#),
+        ];
+        let messages = messages_from_records(&records);
+        assert_eq!(
+            messages.len(),
+            3,
+            "no repair when tool_use already answered"
+        );
+    }
+}
+
+#[cfg(test)]
+mod steer_admission_tests {
+    use super::*;
+
+    fn input(text: &str) -> SteerInput {
+        SteerInput {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// The core regression: a steer that arrives while a turn permit is held
+    /// but steer admission is still closed (the new turn has not reached its
+    /// `start_turn()` yet) must be retried until the turn reopens admission —
+    /// not degraded to `session.prompt`, which would fail with -32001
+    /// "busy with another turn" and lose the input.
+    #[tokio::test]
+    async fn steer_waits_for_a_starting_turn_to_reopen_admission() {
+        let mailbox = SessionSteerMailbox::default();
+        let locks = SessionTurnLocks::default();
+        // Simulate the starting turn: permit acquired (busy) but the mailbox
+        // is still closed. Admission reopens shortly after.
+        let _permit = locks.try_acquire("s1").await.unwrap();
+        assert!(locks.is_busy("s1").await);
+
+        let opener_mailbox = mailbox.clone();
+        let opener = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            opener_mailbox.start_turn();
+        });
+        let steered = push_steer_tolerating_turn_start(
+            &mailbox,
+            &locks,
+            "s1",
+            input("mid-start steer"),
+            TURN_PERMIT_GRACE,
+        )
+        .await;
+        opener.await.unwrap();
+
+        assert!(
+            steered.is_ok(),
+            "steer must land in the mailbox once the starting turn reopens admission"
+        );
+    }
+
+    /// Idle sessions (no permit held) keep the Kimi-compatible degrade: the
+    /// steer becomes a normal new-turn prompt instead of blocking.
+    #[tokio::test]
+    async fn steer_degrades_to_prompt_when_session_is_idle() {
+        let mailbox = SessionSteerMailbox::default();
+        let locks = SessionTurnLocks::default();
+        assert!(!locks.is_busy("s1").await);
+        let result = push_steer_tolerating_turn_start(
+            &mailbox,
+            &locks,
+            "s1",
+            input("late steer"),
+            TURN_PERMIT_GRACE,
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err().text,
+            "late steer",
+            "idle session must degrade immediately so the prompt path takes over"
+        );
+    }
+
+    /// If the permit is held but admission never reopens within the grace
+    /// window, the input still degrades instead of hanging forever.
+    #[tokio::test]
+    async fn steer_gives_up_after_the_grace_window() {
+        let mailbox = SessionSteerMailbox::default();
+        let locks = SessionTurnLocks::default();
+        let _permit = locks.try_acquire("s1").await.unwrap();
+        let result = push_steer_tolerating_turn_start(
+            &mailbox,
+            &locks,
+            "s1",
+            input("stuck steer"),
+            Duration::from_millis(60),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "grace expiry must degrade to the prompt path"
+        );
+    }
+}
+
+#[cfg(test)]
+mod discard_rpc_tests {
+    use super::runtime_http_tests::{rpc_event_sink, test_server_state};
+    use super::*;
+
+    #[tokio::test]
+    async fn discard_refuses_session_with_db_history() {
+        let state = test_server_state().await;
+        let sid = format!("discard-db-{}", uuid::Uuid::new_v4());
+        {
+            let db = state.transcript.lock().await;
+            db.create_session(&sid, "test", "/tmp").unwrap();
+            db.append_message(&sid, "user", r#"[{"type":"text","text":"hi"}]"#, None)
+                .unwrap();
+        }
+
+        let error = handle_rpc_call(
+            state.clone(),
+            "sessions.discard",
+            Some(serde_json::json!({ "session_id": sid })),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("session with transcript history must not be discarded");
+        assert_eq!(error.0, -32000);
+        assert!(error.1.contains("refusing to discard"));
+        assert!(error.1.contains("message(s) in transcript"));
+
+        // History is intact after the refused discard.
+        let messages = {
+            let db = state.transcript.lock().await;
+            db.load_messages(&sid).unwrap()
+        };
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn discard_refuses_session_with_non_empty_disk_transcript() {
+        let state = test_server_state().await;
+        let sid = format!("discard-disk-{}", uuid::Uuid::new_v4());
+        let work = std::env::temp_dir().join(format!("kkagent-discard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work).unwrap();
+        let summary = SessionStore::open_default().create(&sid, &work).unwrap();
+        std::fs::write(
+            Path::new(&summary.session_dir).join("messages.jsonl"),
+            "{\"role\":\"user\"}\n",
+        )
+        .unwrap();
+
+        let error = handle_rpc_call(
+            state.clone(),
+            "sessions.discard",
+            Some(serde_json::json!({ "session_id": sid })),
+            rpc_event_sink(),
+        )
+        .await
+        .expect_err("session with on-disk transcript must not be discarded");
+        assert_eq!(error.0, -32000);
+        assert!(error.1.contains("non-empty on-disk transcript"));
+        assert!(Path::new(&summary.session_dir).is_dir());
+
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[tokio::test]
+    async fn discard_removes_truly_empty_session() {
+        let state = test_server_state().await;
+        let sid = format!("discard-empty-{}", uuid::Uuid::new_v4());
+        let work = std::env::temp_dir().join(format!("kkagent-discard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work).unwrap();
+        let summary = SessionStore::open_default().create(&sid, &work).unwrap();
+
+        let result = handle_rpc_call(
+            state.clone(),
+            "sessions.discard",
+            Some(serde_json::json!({ "session_id": sid })),
+            rpc_event_sink(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["discarded"], serde_json::json!(true));
+        assert!(!Path::new(&summary.session_dir).exists());
+
+        // Second discard is idempotent even though the session is gone.
+        let again = handle_rpc_call(
+            state.clone(),
+            "sessions.discard",
+            Some(serde_json::json!({ "session_id": sid })),
+            rpc_event_sink(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["idempotent"], serde_json::json!(true));
+
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[tokio::test]
+    async fn discard_missing_session_is_idempotent() {
+        let state = test_server_state().await;
+        let result = handle_rpc_call(
+            state,
+            "sessions.discard",
+            Some(serde_json::json!({ "session_id": "never-existed" })),
+            rpc_event_sink(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["idempotent"], serde_json::json!(true));
+    }
+}
+
+#[cfg(test)]
+mod review_regression_tests {
+    use super::*;
+    use kkagent_rpc::HttpBackend;
+
+    async fn active_session() -> (
+        Arc<ServerState>,
+        AgentHttpBackend,
+        Session,
+        tokio::sync::OwnedSemaphorePermit,
+        PathBuf,
+    ) {
+        let state = runtime_http_tests::test_server_state().await;
+        let workspace =
+            std::env::temp_dir().join(format!("kkagent-active-review-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        state.replace_config(Arc::new(AppConfig {
+            default_model: Some("test-model".into()),
+            default_permission_mode: Some("auto".into()),
+            trusted_workspaces: vec![std::fs::canonicalize(&workspace)
+                .unwrap()
+                .display()
+                .to_string()],
+            ..Default::default()
+        }));
+        let backend = AgentHttpBackend {
+            state: state.clone(),
+        };
+        let created = backend
+            .create_session(Some(workspace.display().to_string()), None)
+            .await
+            .unwrap();
+        let id = created["session_id"].as_str().unwrap();
+        let permit = state.turn_locks.try_acquire(id).await.unwrap();
+        let session = state.checkout_session(id).await.unwrap();
+        session.steer_mailbox.start_turn();
+        (state, backend, session, permit, workspace)
+    }
+
+    #[tokio::test]
+    async fn active_http_permission_changes_keep_original_control_handles() {
+        let (state, backend, session, permit, workspace) = active_session().await;
+        let interrupt = session.interrupted.clone();
+        let mode = session.permission_mode.clone();
+        backend
+            .set_permission_mode(&session.id, "manual")
+            .await
+            .unwrap();
+        assert_eq!(session.get_permission_mode(), PermissionMode::Manual);
+        assert!(Arc::ptr_eq(
+            &mode,
+            state
+                .permission_modes
+                .lock()
+                .await
+                .get(&session.id)
+                .unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &interrupt,
+            state.interrupt_flags.lock().await.get(&session.id).unwrap()
+        ));
+        assert!(!state.sessions.lock().await.contains_key(&session.id));
+        backend.interrupt_session(&session.id).await.unwrap();
+        assert!(session.is_interrupted());
+        let id = session.id.clone();
+        state.checkin_session(&id, session).await;
+        drop(permit);
+        state.shutdown().await;
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_http_steer_delivers_once_during_active_turn() {
+        let (state, backend, session, permit, workspace) = active_session().await;
+        let server = state
+            .http_runtime
+            .start(
+                Arc::new(backend),
+                "127.0.0.1:0",
+                Some("fixture-token".into()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let url = format!(
+            "http://{}/api/v1/sessions/{}/messages",
+            server.address, session.id
+        );
+        let body = serde_json::json!({"text":"steer fixture"});
+        let response = client
+            .post(&url)
+            .bearer_auth("fixture-token")
+            .header("idempotency-key", "one-steer")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(response["steered"], true);
+        let task = state
+            .durable_http
+            .get_turn(response["task_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.state, "completed");
+        let retry: serde_json::Value = client
+            .post(&url)
+            .bearer_auth("fixture-token")
+            .header("idempotency-key", "one-steer")
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(retry["replayed"], true);
+        let inputs = session.steer_mailbox.drain();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].text, "steer fixture");
+        assert!(state.durable_http.recoverable_turns().unwrap().is_empty());
+        state.http_runtime.stop().await.unwrap();
+        let id = session.id.clone();
+        state.checkin_session(&id, session).await;
+        drop(permit);
+        state.shutdown().await;
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn http_write_rejects_missing_prefix_parent_traversal() {
+        let base =
+            std::env::temp_dir().join(format!("kkagent-http-traversal-{}", uuid::Uuid::new_v4()));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = AppConfig {
+            trusted_workspaces: vec![workspace.display().to_string()],
+            ..Default::default()
+        };
+        let path = workspace.join("missing/../../escaped.txt");
+        let error = resolve_http_fs_path(&config, &path.display().to_string(), true).unwrap_err();
+        assert!(error.contains("outside trusted workspaces"));
+        let allowed = workspace.join("new/nested/file.txt");
+        assert_eq!(
+            resolve_http_fs_path(&config, &allowed.display().to_string(), true).unwrap(),
+            std::fs::canonicalize(&workspace)
+                .unwrap()
+                .join("new/nested/file.txt")
+        );
+        assert!(!workspace.join("missing").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}

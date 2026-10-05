@@ -1,0 +1,118 @@
+此输出用于归因。cProfile 会扰动速度，不应与无插桩样本比较。
+
+         20656017 function calls (15604429 primitive calls) in 3.313 seconds
+
+   Ordered by: cumulative time
+   List reduced from 62 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.004    0.004    3.313    3.313 sqlite_storage.py:643(get_snapshot)
+        1    0.001    0.001    3.308    3.308 sqlite_storage.py:649(_get_snapshot)
+ 255998/9    0.309    0.000    3.307    0.367 sqlite_storage.py:253(items)
+5082318/286719    1.756    0.000    3.148    0.000 sqlite_storage.py:291(expand)
+     1066    0.002    0.000    0.594    0.001 sqlite_storage.py:123(_decode_chunk)
+     1068    0.001    0.000    0.569    0.001 __init__.py:299(loads)
+     1068    0.001    0.000    0.561    0.001 decoder.py:340(decode)
+     1068    0.559    0.001    0.559    0.001 decoder.py:351(raw_decode)
+  9032938    0.327    0.000    0.327    0.000 {built-in method builtins.isinstance}
+  2537151    0.097    0.000    0.097    0.000 {built-in method builtins.len}
+   884362    0.051    0.000    0.051    0.000 {method 'items' of 'dict' objects}
+   762550    0.041    0.000    0.041    0.000 sqlite_storage.py:239(descriptor)
+   513618    0.029    0.000    0.029    0.000 {built-in method builtins.min}
+   542708    0.029    0.000    0.029    0.000 {method 'append' of 'list' objects}
+     1066    0.023    0.000    0.023    0.000 {method 'decompress' of 'zlib.Decompress' objects}
+   255488    0.019    0.000    0.019    0.000 {method 'move_to_end' of 'collections.OrderedDict' objects}
+   255989    0.017    0.000    0.017    0.000 {method 'add' of 'set' objects}
+   255989    0.016    0.000    0.016    0.000 {method 'remove' of 'set' objects}
+   256554    0.015    0.000    0.015    0.000 {built-in method builtins.max}
+     1082    0.006    0.000    0.006    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+     1067    0.003    0.000    0.003    0.000 {method 'decode' of 'bytes' objects}
+     1066    0.002    0.000    0.002    0.000 decoder.py:292(__init__)
+     1077    0.001    0.000    0.001    0.000 {method 'fetchone' of 'sqlite3.Cursor' objects}
+     1066    0.001    0.000    0.001    0.000 __init__.py:244(detect_encoding)
+     2136    0.001    0.000    0.001    0.000 {method 'match' of 're.Pattern' objects}
+     1066    0.000    0.000    0.000    0.000 {built-in method zlib.decompressobj}
+        2    0.000    0.000    0.000    0.000 {built-in method builtins.next}
+        2    0.000    0.000    0.000    0.000 sqlite_storage.py:363(_connect)
+     1058    0.000    0.000    0.000    0.000 {method 'popitem' of 'collections.OrderedDict' objects}
+        1    0.000    0.000    0.000    0.000 sqlite_storage.py:581(_snapshot)
+     3198    0.000    0.000    0.000    0.000 {method 'startswith' of 'bytes' objects}
+     2136    0.000    0.000    0.000    0.000 {method 'end' of 're.Match' objects}
+        1    0.000    0.000    0.000    0.000 contextlib.py:145(__exit__)
+        1    0.000    0.000    0.000    0.000 {method 'close' of 'sqlite3.Connection' objects}
+        1    0.000    0.000    0.000    0.000 contextlib.py:136(__enter__)
+        1    0.000    0.000    0.000    0.000 {built-in method _sqlite3.connect}
+        1    0.000    0.000    0.000    0.000 _local.py:428(as_uri)
+        1    0.000    0.000    0.000    0.000 sqlite_storage.py:602(_annotations)
+        1    0.000    0.000    0.000    0.000 <frozen os>:843(fsencode)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 functools.py:544(decorating_function)
+        1    0.000    0.000    0.000    0.000 functools.py:36(update_wrapper)
+        1    0.000    0.000    0.000    0.000 contextlib.py:303(helper)
+        1    0.000    0.000    0.000    0.000 contextlib.py:108(__init__)
+        1    0.000    0.000    0.000    0.000 parse.py:951(quote_from_bytes)
+        9    0.000    0.000    0.000    0.000 {built-in method builtins.getattr}
+       11    0.000    0.000    0.000    0.000 {method 'startswith' of 'str' objects}
+        1    0.000    0.000    0.000    0.000 _local.py:406(is_absolute)
+        1    0.000    0.000    0.000    0.000 parse.py:845(__getattr__)
+        1    0.000    0.000    0.000    0.000 functools.py:504(lru_cache)
+
+
+         20656017 function calls (15604429 primitive calls) in 3.313 seconds
+
+   Ordered by: internal time
+   List reduced from 62 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+5082318/286719    1.756    0.000    3.148    0.000 sqlite_storage.py:291(expand)
+     1068    0.559    0.001    0.559    0.001 decoder.py:351(raw_decode)
+  9032938    0.327    0.000    0.327    0.000 {built-in method builtins.isinstance}
+ 255998/9    0.309    0.000    3.307    0.367 sqlite_storage.py:253(items)
+  2537151    0.097    0.000    0.097    0.000 {built-in method builtins.len}
+   884362    0.051    0.000    0.051    0.000 {method 'items' of 'dict' objects}
+   762550    0.041    0.000    0.041    0.000 sqlite_storage.py:239(descriptor)
+   513618    0.029    0.000    0.029    0.000 {built-in method builtins.min}
+   542708    0.029    0.000    0.029    0.000 {method 'append' of 'list' objects}
+     1066    0.023    0.000    0.023    0.000 {method 'decompress' of 'zlib.Decompress' objects}
+   255488    0.019    0.000    0.019    0.000 {method 'move_to_end' of 'collections.OrderedDict' objects}
+   255989    0.017    0.000    0.017    0.000 {method 'add' of 'set' objects}
+   255989    0.016    0.000    0.016    0.000 {method 'remove' of 'set' objects}
+   256554    0.015    0.000    0.015    0.000 {built-in method builtins.max}
+     1082    0.006    0.000    0.006    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+        1    0.004    0.004    3.313    3.313 sqlite_storage.py:643(get_snapshot)
+     1067    0.003    0.000    0.003    0.000 {method 'decode' of 'bytes' objects}
+     1066    0.002    0.000    0.002    0.000 decoder.py:292(__init__)
+     1066    0.002    0.000    0.594    0.001 sqlite_storage.py:123(_decode_chunk)
+     1068    0.001    0.000    0.569    0.001 __init__.py:299(loads)
+     1077    0.001    0.000    0.001    0.000 {method 'fetchone' of 'sqlite3.Cursor' objects}
+     1068    0.001    0.000    0.561    0.001 decoder.py:340(decode)
+     1066    0.001    0.000    0.001    0.000 __init__.py:244(detect_encoding)
+     2136    0.001    0.000    0.001    0.000 {method 'match' of 're.Pattern' objects}
+        1    0.001    0.001    3.308    3.308 sqlite_storage.py:649(_get_snapshot)
+     1066    0.000    0.000    0.000    0.000 {built-in method zlib.decompressobj}
+     1058    0.000    0.000    0.000    0.000 {method 'popitem' of 'collections.OrderedDict' objects}
+     3198    0.000    0.000    0.000    0.000 {method 'startswith' of 'bytes' objects}
+     2136    0.000    0.000    0.000    0.000 {method 'end' of 're.Match' objects}
+        1    0.000    0.000    0.000    0.000 {method 'close' of 'sqlite3.Connection' objects}
+        1    0.000    0.000    0.000    0.000 {built-in method _sqlite3.connect}
+        1    0.000    0.000    0.000    0.000 <frozen os>:843(fsencode)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 contextlib.py:108(__init__)
+        1    0.000    0.000    0.000    0.000 sqlite_storage.py:581(_snapshot)
+        1    0.000    0.000    0.000    0.000 _local.py:428(as_uri)
+        1    0.000    0.000    0.000    0.000 functools.py:36(update_wrapper)
+        2    0.000    0.000    0.000    0.000 sqlite_storage.py:363(_connect)
+        1    0.000    0.000    0.000    0.000 parse.py:951(quote_from_bytes)
+        2    0.000    0.000    0.000    0.000 {built-in method builtins.next}
+        9    0.000    0.000    0.000    0.000 {built-in method builtins.getattr}
+        1    0.000    0.000    0.000    0.000 contextlib.py:145(__exit__)
+       11    0.000    0.000    0.000    0.000 {method 'startswith' of 'str' objects}
+        1    0.000    0.000    0.000    0.000 functools.py:544(decorating_function)
+        1    0.000    0.000    0.000    0.000 _local.py:406(is_absolute)
+        1    0.000    0.000    0.000    0.000 parse.py:845(__getattr__)
+        1    0.000    0.000    0.000    0.000 sqlite_storage.py:602(_annotations)
+        1    0.000    0.000    0.000    0.000 contextlib.py:303(helper)
+        8    0.000    0.000    0.000    0.000 {method 'get' of 'dict' objects}
+        1    0.000    0.000    0.000    0.000 functools.py:504(lru_cache)
+
+

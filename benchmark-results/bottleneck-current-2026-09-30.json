@@ -1,0 +1,737 @@
+{
+  "path": "/Users/meow233/Downloads/project/dist/challenge",
+  "sha256": "223358017040ab6ed519b4ad8f5ff4f30a00a167f6e1a54238b2f266b7a85d55",
+  "size_bytes": 1239360,
+  "kind": "elf",
+  "runs": 3,
+  "python": "3.13.2",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "cpu_count": 15,
+  "full_analysis": true,
+  "scope": "Full file-backed executable-region disassembly, function recovery, CFG and xrefs; Ghidra disabled; recovery completeness is reported separately.",
+  "measurement_scope": {
+    "seconds": "Warm service.analyze wall time; excludes evidence hashing and service startup/shutdown",
+    "cold_total_seconds": "Service construction plus first analyze; excludes interpreter/import/hash setup and shutdown; OS caches are uncontrolled",
+    "cpu_seconds": "Current-process CPU across all threads; excludes child processes",
+    "child_cpu_seconds": "CPU of reaped children during this call; unavailable without resource.getrusage",
+    "peak_rss_bytes": "Whole benchmark process lifetime high-water RSS; cumulative across calls and modes, includes evidence hashing; unavailable without resource.getrusage",
+    "postprocess_seconds": "Evidence digest and coverage extraction after each call; excluded from seconds",
+    "single_thread": "One decoder worker; xref still has a separate worker whenever analyze_threads budget exceeds one"
+  },
+  "peak_rss_bytes": 657932288,
+  "settings": {
+    "max_bytes": 16777216,
+    "analyze_threads_budget": 8,
+    "semantic_max_functions": 128,
+    "semantic_max_instructions": 8192,
+    "full_analysis": true
+  },
+  "single_thread": {
+    "semantic_threads": 1,
+    "seconds": [
+      3.848876,
+      3.837451,
+      3.81093
+    ],
+    "median_seconds": 3.837451,
+    "cpu_seconds": [
+      3.848551,
+      3.837276,
+      3.809956
+    ],
+    "median_cpu_seconds": 3.837276,
+    "postprocess_seconds": [
+      5.974996,
+      5.993038,
+      5.974611
+    ],
+    "measurements": [
+      {
+        "analysis_wall_seconds": 3.848876,
+        "cpu_seconds": 3.848551,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 646266880,
+        "phase_seconds": {
+          "disassembly": 3.011709291000443,
+          "xref": 0.059765124999103136,
+          "function_recovery": 0.0068119170027785,
+          "cfg": 0.6126319169998169,
+          "xref_index": 0.11862270900019212,
+          "total": 3.8210171250029816
+        },
+        "postprocess_seconds": 5.974996
+      },
+      {
+        "analysis_wall_seconds": 3.837451,
+        "cpu_seconds": 3.837276,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 646266880,
+        "phase_seconds": {
+          "disassembly": 3.0145027920007124,
+          "xref": 0.049684874997183215,
+          "function_recovery": 0.006751291002728976,
+          "cfg": 0.6067550410007243,
+          "xref_index": 0.12044400000013411,
+          "total": 3.8092532080045203
+        },
+        "postprocess_seconds": 5.993038
+      },
+      {
+        "analysis_wall_seconds": 3.81093,
+        "cpu_seconds": 3.809956,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 646266880,
+        "phase_seconds": {
+          "disassembly": 2.969711625002674,
+          "xref": 0.060653749998891726,
+          "function_recovery": 0.007091749997925945,
+          "cfg": 0.6141038329951698,
+          "xref_index": 0.11993370900017908,
+          "total": 3.783024750002369
+        },
+        "postprocess_seconds": 5.974611
+      }
+    ],
+    "cold_total_seconds": 3.911157,
+    "cold_cpu_seconds": 3.892926,
+    "cold_measurement": {
+      "analysis_wall_seconds": 3.909872,
+      "cpu_seconds": 3.892828,
+      "child_cpu_seconds": 0,
+      "process_peak_rss_bytes": 449609728,
+      "phase_seconds": {
+        "disassembly": 3.020118749998801,
+        "xref": 0.059848249999049585,
+        "function_recovery": 0.008117833000142127,
+        "cfg": 0.6282733749976614,
+        "xref_index": 0.118485499995586,
+        "total": 3.846124208001129
+      },
+      "postprocess_seconds": 5.943223
+    },
+    "cold_coverage": {
+      "status": "partial",
+      "functions": 690,
+      "xrefs": 28913,
+      "scanned_bytes": 1239360,
+      "xref_kinds": {
+        "call": 18,
+        "data": 13973,
+        "jmp": 14922
+      },
+      "function_sources": {
+        "direct_call": 1,
+        "eh_frame": 685,
+        "executable_region": 2,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "cfg_functions": 690,
+      "cfg_blocks": 22694,
+      "cfg_frontiers": 5,
+      "complete_function_cfgs": 685,
+      "full_analysis": true,
+      "full_coverage": {
+        "enabled": true,
+        "scope": "all_file_backed_executable_regions",
+        "executable_bytes": 1000880,
+        "decoded_bytes": 1000880,
+        "decode_complete": true,
+        "instruction_count": 255974,
+        "unassigned_instructions": 5538,
+        "function_recovery_complete": false,
+        "regions": [
+          {
+            "name": ".init",
+            "address": 8192,
+            "offset": 8192,
+            "size": 23,
+            "file_backed_size": 23,
+            "decoded_bytes": 23,
+            "instruction_count": 7,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt",
+            "address": 8224,
+            "offset": 8224,
+            "size": 192,
+            "file_backed_size": 192,
+            "decoded_bytes": 192,
+            "instruction_count": 36,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt.got",
+            "address": 8416,
+            "offset": 8416,
+            "size": 8,
+            "file_backed_size": 8,
+            "decoded_bytes": 8,
+            "instruction_count": 2,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".text",
+            "address": 8432,
+            "offset": 8432,
+            "size": 1000648,
+            "file_backed_size": 1000648,
+            "decoded_bytes": 1000648,
+            "instruction_count": 255926,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".fini",
+            "address": 1009080,
+            "offset": 1009080,
+            "size": 9,
+            "file_backed_size": 9,
+            "decoded_bytes": 9,
+            "instruction_count": 3,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          }
+        ],
+        "xref_pass_complete": true,
+        "cfg_pass_complete": true,
+        "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+        "input_truncated": false
+      },
+      "full_instructions": 255974,
+      "full_decoded_bytes": 1000880,
+      "full_executable_bytes": 1000880,
+      "full_decode_complete": true,
+      "full_cfg_functions": 690,
+      "full_unassigned_instructions": 5538,
+      "full_function_sources": {
+        "executable_region": 2,
+        "eh_frame": 685,
+        "direct_call": 1,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "semantic_functions": 690,
+      "semantic_pending_symbols": null,
+      "semantic_instructions": 250436,
+      "semantic_partial_functions": 5,
+      "semantic_budget_exhausted": false,
+      "semantic_decoder": "capstone",
+      "semantic_cancelled": false,
+      "semantic_workers_requested": 1,
+      "semantic_workers_used": 1,
+      "semantic_parallel_functions": 0
+    },
+    "cold_output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+    "decoder_threads_effective": 1,
+    "xref_threads": 1,
+    "coverage": {
+      "status": "partial",
+      "functions": 690,
+      "xrefs": 28913,
+      "scanned_bytes": 1239360,
+      "xref_kinds": {
+        "call": 18,
+        "data": 13973,
+        "jmp": 14922
+      },
+      "function_sources": {
+        "direct_call": 1,
+        "eh_frame": 685,
+        "executable_region": 2,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "cfg_functions": 690,
+      "cfg_blocks": 22694,
+      "cfg_frontiers": 5,
+      "complete_function_cfgs": 685,
+      "full_analysis": true,
+      "full_coverage": {
+        "enabled": true,
+        "scope": "all_file_backed_executable_regions",
+        "executable_bytes": 1000880,
+        "decoded_bytes": 1000880,
+        "decode_complete": true,
+        "instruction_count": 255974,
+        "unassigned_instructions": 5538,
+        "function_recovery_complete": false,
+        "regions": [
+          {
+            "name": ".init",
+            "address": 8192,
+            "offset": 8192,
+            "size": 23,
+            "file_backed_size": 23,
+            "decoded_bytes": 23,
+            "instruction_count": 7,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt",
+            "address": 8224,
+            "offset": 8224,
+            "size": 192,
+            "file_backed_size": 192,
+            "decoded_bytes": 192,
+            "instruction_count": 36,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt.got",
+            "address": 8416,
+            "offset": 8416,
+            "size": 8,
+            "file_backed_size": 8,
+            "decoded_bytes": 8,
+            "instruction_count": 2,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".text",
+            "address": 8432,
+            "offset": 8432,
+            "size": 1000648,
+            "file_backed_size": 1000648,
+            "decoded_bytes": 1000648,
+            "instruction_count": 255926,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".fini",
+            "address": 1009080,
+            "offset": 1009080,
+            "size": 9,
+            "file_backed_size": 9,
+            "decoded_bytes": 9,
+            "instruction_count": 3,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          }
+        ],
+        "xref_pass_complete": true,
+        "cfg_pass_complete": true,
+        "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+        "input_truncated": false
+      },
+      "full_instructions": 255974,
+      "full_decoded_bytes": 1000880,
+      "full_executable_bytes": 1000880,
+      "full_decode_complete": true,
+      "full_cfg_functions": 690,
+      "full_unassigned_instructions": 5538,
+      "full_function_sources": {
+        "executable_region": 2,
+        "eh_frame": 685,
+        "direct_call": 1,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "semantic_functions": 690,
+      "semantic_pending_symbols": null,
+      "semantic_instructions": 250436,
+      "semantic_partial_functions": 5,
+      "semantic_budget_exhausted": false,
+      "semantic_decoder": "capstone",
+      "semantic_cancelled": false,
+      "semantic_workers_requested": 1,
+      "semantic_workers_used": 1,
+      "semantic_parallel_functions": 0
+    },
+    "output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+    "stable_output": true
+  },
+  "multi_thread": {
+    "semantic_threads": 4,
+    "seconds": [
+      3.85865,
+      3.837523,
+      3.934094
+    ],
+    "median_seconds": 3.85865,
+    "cpu_seconds": [
+      3.866065,
+      3.844662,
+      3.930442
+    ],
+    "median_cpu_seconds": 3.866065,
+    "postprocess_seconds": [
+      5.946982,
+      6.010455,
+      6.275343
+    ],
+    "measurements": [
+      {
+        "analysis_wall_seconds": 3.85865,
+        "cpu_seconds": 3.866065,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 646266880,
+        "phase_seconds": {
+          "disassembly": 3.006734916998539,
+          "xref": 0.06014337499800604,
+          "function_recovery": 0.006881124994833954,
+          "cfg": 0.6263573749965872,
+          "xref_index": 0.11851033399580047,
+          "total": 3.8308553750030114
+        },
+        "postprocess_seconds": 5.946982
+      },
+      {
+        "analysis_wall_seconds": 3.837523,
+        "cpu_seconds": 3.844662,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 646266880,
+        "phase_seconds": {
+          "disassembly": 2.9865704589974484,
+          "xref": 0.0602747089942568,
+          "function_recovery": 0.006830999998783227,
+          "cfg": 0.6244180829962716,
+          "xref_index": 0.11955866600328591,
+          "total": 3.809295792001649
+        },
+        "postprocess_seconds": 6.010455
+      },
+      {
+        "analysis_wall_seconds": 3.934094,
+        "cpu_seconds": 3.930442,
+        "child_cpu_seconds": 0,
+        "process_peak_rss_bytes": 657932288,
+        "phase_seconds": {
+          "disassembly": 3.054573875000642,
+          "xref": 0.059255583000776824,
+          "function_recovery": 0.006820915994467214,
+          "cfg": 0.6449183750009979,
+          "xref_index": 0.12497779100522166,
+          "total": 3.9046233749977546
+        },
+        "postprocess_seconds": 6.275343
+      }
+    ],
+    "cold_total_seconds": 3.85233,
+    "cold_cpu_seconds": 3.859585,
+    "cold_measurement": {
+      "analysis_wall_seconds": 3.852151,
+      "cpu_seconds": 3.85942,
+      "child_cpu_seconds": 0,
+      "process_peak_rss_bytes": 576749568,
+      "phase_seconds": {
+        "disassembly": 3.0014504169957945,
+        "xref": 0.05944166699919151,
+        "function_recovery": 0.007018917000095826,
+        "cfg": 0.6277782910037786,
+        "xref_index": 0.11604520799301099,
+        "total": 3.8229684999969322
+      },
+      "postprocess_seconds": 5.962919
+    },
+    "cold_coverage": {
+      "status": "partial",
+      "functions": 690,
+      "xrefs": 28913,
+      "scanned_bytes": 1239360,
+      "xref_kinds": {
+        "call": 18,
+        "data": 13973,
+        "jmp": 14922
+      },
+      "function_sources": {
+        "direct_call": 1,
+        "eh_frame": 685,
+        "executable_region": 2,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "cfg_functions": 690,
+      "cfg_blocks": 22694,
+      "cfg_frontiers": 5,
+      "complete_function_cfgs": 685,
+      "full_analysis": true,
+      "full_coverage": {
+        "enabled": true,
+        "scope": "all_file_backed_executable_regions",
+        "executable_bytes": 1000880,
+        "decoded_bytes": 1000880,
+        "decode_complete": true,
+        "instruction_count": 255974,
+        "unassigned_instructions": 5538,
+        "function_recovery_complete": false,
+        "regions": [
+          {
+            "name": ".init",
+            "address": 8192,
+            "offset": 8192,
+            "size": 23,
+            "file_backed_size": 23,
+            "decoded_bytes": 23,
+            "instruction_count": 7,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt",
+            "address": 8224,
+            "offset": 8224,
+            "size": 192,
+            "file_backed_size": 192,
+            "decoded_bytes": 192,
+            "instruction_count": 36,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt.got",
+            "address": 8416,
+            "offset": 8416,
+            "size": 8,
+            "file_backed_size": 8,
+            "decoded_bytes": 8,
+            "instruction_count": 2,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".text",
+            "address": 8432,
+            "offset": 8432,
+            "size": 1000648,
+            "file_backed_size": 1000648,
+            "decoded_bytes": 1000648,
+            "instruction_count": 255926,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".fini",
+            "address": 1009080,
+            "offset": 1009080,
+            "size": 9,
+            "file_backed_size": 9,
+            "decoded_bytes": 9,
+            "instruction_count": 3,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          }
+        ],
+        "xref_pass_complete": true,
+        "cfg_pass_complete": true,
+        "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+        "input_truncated": false
+      },
+      "full_instructions": 255974,
+      "full_decoded_bytes": 1000880,
+      "full_executable_bytes": 1000880,
+      "full_decode_complete": true,
+      "full_cfg_functions": 690,
+      "full_unassigned_instructions": 5538,
+      "full_function_sources": {
+        "executable_region": 2,
+        "eh_frame": 685,
+        "direct_call": 1,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "semantic_functions": 690,
+      "semantic_pending_symbols": null,
+      "semantic_instructions": 250436,
+      "semantic_partial_functions": 5,
+      "semantic_budget_exhausted": false,
+      "semantic_decoder": "capstone",
+      "semantic_cancelled": false,
+      "semantic_workers_requested": 4,
+      "semantic_workers_used": 4,
+      "semantic_parallel_functions": 690
+    },
+    "cold_output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+    "decoder_threads_effective": 4,
+    "xref_threads": 1,
+    "coverage": {
+      "status": "partial",
+      "functions": 690,
+      "xrefs": 28913,
+      "scanned_bytes": 1239360,
+      "xref_kinds": {
+        "call": 18,
+        "data": 13973,
+        "jmp": 14922
+      },
+      "function_sources": {
+        "direct_call": 1,
+        "eh_frame": 685,
+        "executable_region": 2,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "cfg_functions": 690,
+      "cfg_blocks": 22694,
+      "cfg_frontiers": 5,
+      "complete_function_cfgs": 685,
+      "full_analysis": true,
+      "full_coverage": {
+        "enabled": true,
+        "scope": "all_file_backed_executable_regions",
+        "executable_bytes": 1000880,
+        "decoded_bytes": 1000880,
+        "decode_complete": true,
+        "instruction_count": 255974,
+        "unassigned_instructions": 5538,
+        "function_recovery_complete": false,
+        "regions": [
+          {
+            "name": ".init",
+            "address": 8192,
+            "offset": 8192,
+            "size": 23,
+            "file_backed_size": 23,
+            "decoded_bytes": 23,
+            "instruction_count": 7,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt",
+            "address": 8224,
+            "offset": 8224,
+            "size": 192,
+            "file_backed_size": 192,
+            "decoded_bytes": 192,
+            "instruction_count": 36,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".plt.got",
+            "address": 8416,
+            "offset": 8416,
+            "size": 8,
+            "file_backed_size": 8,
+            "decoded_bytes": 8,
+            "instruction_count": 2,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".text",
+            "address": 8432,
+            "offset": 8432,
+            "size": 1000648,
+            "file_backed_size": 1000648,
+            "decoded_bytes": 1000648,
+            "instruction_count": 255926,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          },
+          {
+            "name": ".fini",
+            "address": 1009080,
+            "offset": 1009080,
+            "size": 9,
+            "file_backed_size": 9,
+            "decoded_bytes": 9,
+            "instruction_count": 3,
+            "gaps": [],
+            "complete": true,
+            "details_complete": true,
+            "cancelled": false,
+            "engine": "capstone"
+          }
+        ],
+        "xref_pass_complete": true,
+        "cfg_pass_complete": true,
+        "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+        "input_truncated": false
+      },
+      "full_instructions": 255974,
+      "full_decoded_bytes": 1000880,
+      "full_executable_bytes": 1000880,
+      "full_decode_complete": true,
+      "full_cfg_functions": 690,
+      "full_unassigned_instructions": 5538,
+      "full_function_sources": {
+        "executable_region": 2,
+        "eh_frame": 685,
+        "direct_call": 1,
+        "fini_array": 1,
+        "init_array": 1
+      },
+      "semantic_functions": 690,
+      "semantic_pending_symbols": null,
+      "semantic_instructions": 250436,
+      "semantic_partial_functions": 5,
+      "semantic_budget_exhausted": false,
+      "semantic_decoder": "capstone",
+      "semantic_cancelled": false,
+      "semantic_workers_requested": 4,
+      "semantic_workers_used": 4,
+      "semantic_parallel_functions": 690
+    },
+    "output_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+    "stable_output": true
+  },
+  "same_evidence_and_scope": true,
+  "local_median_ratio": 0.995
+}

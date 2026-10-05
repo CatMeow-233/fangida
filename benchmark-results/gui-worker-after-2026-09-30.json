@@ -1,0 +1,30 @@
+{
+  "source": "/Users/meow233/Downloads/project/dist/challenge",
+  "mode": "full",
+  "gui_worker_ready_seconds": 2.8188548340003763,
+  "timing_scope": "Actual GUI _worker through queued prepared results; excludes visible Tk rendering and database save",
+  "benchmark_execution": "sequential, no concurrent benchmark processes",
+  "share_completed_opt_in": true,
+  "phase_seconds": {
+    "disassembly": 2.147714333001204,
+    "xref": 0.049871000002895016,
+    "function_recovery": 0.005926624999119667,
+    "cfg": 0.4523974579969945,
+    "xref_index": 0.1063060000014957,
+    "total": 2.774398999998084
+  },
+  "instructions": 255974,
+  "function_roots": 690,
+  "xrefs": 28913,
+  "table_counts": {
+    "Sections": 30,
+    "Functions": 690,
+    "Disassembly": 255974,
+    "Strings": 1000,
+    "Imports": 16,
+    "Exports": 0,
+    "Xrefs": 28913
+  },
+  "default_semantic_workers": 4,
+  "rss_lifetime_peak_bytes": 456179712
+}

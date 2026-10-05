@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(fangida_native_cpp LANGUAGES CXX)
+
+add_library(fangida_native_cpp SHARED src/fangida_native.cpp)
+target_compile_features(fangida_native_cpp PRIVATE cxx_std_17)
+target_compile_definitions(fangida_native_cpp PRIVATE FANGIDA_NATIVE_BUILD)
+target_include_directories(fangida_native_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(fangida_native_cpp_test tests/test_native.cpp)
+    target_compile_features(fangida_native_cpp_test PRIVATE cxx_std_17)
+    target_link_libraries(fangida_native_cpp_test PRIVATE fangida_native_cpp)
+    add_test(NAME fangida_native_cpp_test COMMAND fangida_native_cpp_test)
+endif()

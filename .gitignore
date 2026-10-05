@@ -1,0 +1,26 @@
+# Python 构建与缓存产物
+__pycache__/
+*.py[cod]
+/build/
+/dist/
+*.egg-info/
+.pytest_cache/
+
+# Rust agent 编译产物（约 5GB）
+/agents/kkagent/target/
+
+# 本地分析数据库与临时基准输出（可再生成）
+/analysis-databases/
+/bench-full.json
+*.fdb
+*.fdb-shm
+*.fdb-wal
+
+# 本地 UI 预览构建
+/.ui-preview/*.app/
+
+# 系统 / 编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp

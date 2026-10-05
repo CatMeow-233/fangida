@@ -1,0 +1,31 @@
+# Build
+/target/
+**/*.rs.bk
+
+# Secrets / local config copies
+.env
+.env.*
+!.env.example
+/.kkagent/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Reference / local scratch
+/ref/
+/tmp/
+*.log
+/specs/
+/upload.sh
+
+# Node build artifacts
+**/node_modules/
+sdk/node/dist/
+
+# Release dist
+/target/release-dist/
+LOCAL.md
+issues

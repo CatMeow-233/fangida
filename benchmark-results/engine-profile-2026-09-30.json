@@ -1,0 +1,1447 @@
+{
+  "source": "/Users/meow233/Downloads/project/dist/challenge",
+  "source_sha256": "223358017040ab6ed519b4ad8f5ff4f30a00a167f6e1a54238b2f266b7a85d55",
+  "size_bytes": 1239360,
+  "python": "3.13.2",
+  "cpu_count": 15,
+  "scope": "完整文件内可执行区、函数恢复、CFG 和 xref；关闭 Ghidra；不含 API 序列化、数据库保存和 UI 绘制",
+  "default_settings": {
+    "semantic_threads": 4,
+    "analyze_threads": 8
+  },
+  "measurements": {
+    "one_decode_worker": {
+      "runs": [
+        {
+          "round": 1,
+          "wall_seconds": 2.9764244580001105,
+          "phase_seconds": {
+            "disassembly": 2.3355227499996545,
+            "xref": 0.051329083002201514,
+            "function_recovery": 0.004814749998331536,
+            "cfg": 0.4400566250005795,
+            "xref_index": 0.11279883300085203,
+            "total": 2.9554214170020714
+          },
+          "decode_workers_used": 1,
+          "cfg_workers_used": 1,
+          "xref_workers": 1,
+          "effective_decode_workers": 1
+        },
+        {
+          "round": 2,
+          "wall_seconds": 2.977478125001653,
+          "phase_seconds": {
+            "disassembly": 2.3355696670005273,
+            "xref": 0.051060582998616155,
+            "function_recovery": 0.004753124998387648,
+            "cfg": 0.444578457998432,
+            "xref_index": 0.10937100000228384,
+            "total": 2.956845542001247
+          },
+          "decode_workers_used": 1,
+          "cfg_workers_used": 1,
+          "xref_workers": 1,
+          "effective_decode_workers": 1
+        },
+        {
+          "round": 3,
+          "wall_seconds": 2.9870495830000436,
+          "phase_seconds": {
+            "disassembly": 2.346429959001398,
+            "xref": 0.051296042001922615,
+            "function_recovery": 0.0047797909974178765,
+            "cfg": 0.44637245800186065,
+            "xref_index": 0.1058639580005547,
+            "total": 2.9662436670005263
+          },
+          "decode_workers_used": 1,
+          "cfg_workers_used": 1,
+          "xref_workers": 1,
+          "effective_decode_workers": 1
+        }
+      ],
+      "median_wall_seconds": 2.977478125001653,
+      "median_phase_seconds": {
+        "disassembly": 2.3355696670005273,
+        "xref": 0.051296042001922615,
+        "function_recovery": 0.0047797909974178765,
+        "cfg": 0.444578457998432,
+        "xref_index": 0.10937100000228384,
+        "total": 2.956845542001247
+      },
+      "evidence_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+      "coverage": {
+        "status": "partial",
+        "functions": 690,
+        "xrefs": 28913,
+        "scanned_bytes": 1239360,
+        "xref_kinds": {
+          "call": 18,
+          "data": 13973,
+          "jmp": 14922
+        },
+        "function_sources": {
+          "direct_call": 1,
+          "eh_frame": 685,
+          "executable_region": 2,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "cfg_functions": 690,
+        "cfg_blocks": 22694,
+        "cfg_frontiers": 5,
+        "complete_function_cfgs": 685,
+        "full_analysis": true,
+        "full_coverage": {
+          "enabled": true,
+          "scope": "all_file_backed_executable_regions",
+          "executable_bytes": 1000880,
+          "decoded_bytes": 1000880,
+          "decode_complete": true,
+          "instruction_count": 255974,
+          "unassigned_instructions": 5538,
+          "function_recovery_complete": false,
+          "regions": [
+            {
+              "name": ".init",
+              "address": 8192,
+              "offset": 8192,
+              "size": 23,
+              "file_backed_size": 23,
+              "decoded_bytes": 23,
+              "instruction_count": 7,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt",
+              "address": 8224,
+              "offset": 8224,
+              "size": 192,
+              "file_backed_size": 192,
+              "decoded_bytes": 192,
+              "instruction_count": 36,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt.got",
+              "address": 8416,
+              "offset": 8416,
+              "size": 8,
+              "file_backed_size": 8,
+              "decoded_bytes": 8,
+              "instruction_count": 2,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".text",
+              "address": 8432,
+              "offset": 8432,
+              "size": 1000648,
+              "file_backed_size": 1000648,
+              "decoded_bytes": 1000648,
+              "instruction_count": 255926,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".fini",
+              "address": 1009080,
+              "offset": 1009080,
+              "size": 9,
+              "file_backed_size": 9,
+              "decoded_bytes": 9,
+              "instruction_count": 3,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            }
+          ],
+          "xref_pass_complete": true,
+          "cfg_pass_complete": true,
+          "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+          "input_truncated": false
+        },
+        "full_instructions": 255974,
+        "full_decoded_bytes": 1000880,
+        "full_executable_bytes": 1000880,
+        "full_decode_complete": true,
+        "full_cfg_functions": 690,
+        "full_unassigned_instructions": 5538,
+        "full_function_sources": {
+          "executable_region": 2,
+          "eh_frame": 685,
+          "direct_call": 1,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "semantic_functions": 690,
+        "semantic_pending_symbols": null,
+        "semantic_instructions": 250436,
+        "semantic_partial_functions": 5,
+        "semantic_budget_exhausted": false,
+        "semantic_decoder": "capstone",
+        "semantic_cancelled": false,
+        "semantic_workers_requested": 1,
+        "semantic_workers_used": 1,
+        "semantic_parallel_functions": 0
+      }
+    },
+    "default_decode_workers": {
+      "runs": [
+        {
+          "round": 1,
+          "wall_seconds": 2.997060625002632,
+          "phase_seconds": {
+            "disassembly": 2.333663166999031,
+            "xref": 0.05131875000006403,
+            "function_recovery": 0.00477258400132996,
+            "cfg": 0.4680609999995795,
+            "xref_index": 0.10723358299946995,
+            "total": 2.976832291999017
+          },
+          "decode_workers_used": 4,
+          "cfg_workers_used": 4,
+          "xref_workers": 1,
+          "effective_decode_workers": 4
+        },
+        {
+          "round": 2,
+          "wall_seconds": 2.9947947089967784,
+          "phase_seconds": {
+            "disassembly": 2.3403905000013765,
+            "xref": 0.05110370799957309,
+            "function_recovery": 0.004781999999977415,
+            "cfg": 0.4591582920002111,
+            "xref_index": 0.10746741699767881,
+            "total": 2.97442462500112
+          },
+          "decode_workers_used": 4,
+          "cfg_workers_used": 4,
+          "xref_workers": 1,
+          "effective_decode_workers": 4
+        },
+        {
+          "round": 3,
+          "wall_seconds": 3.1657822909983224,
+          "phase_seconds": {
+            "disassembly": 2.3778502919994935,
+            "xref": 0.05269945799955167,
+            "function_recovery": 0.004729000000224914,
+            "cfg": 0.5184477090006112,
+            "xref_index": 0.17965675000232295,
+            "total": 3.1445868330010853
+          },
+          "decode_workers_used": 4,
+          "cfg_workers_used": 4,
+          "xref_workers": 1,
+          "effective_decode_workers": 4
+        }
+      ],
+      "median_wall_seconds": 2.997060625002632,
+      "median_phase_seconds": {
+        "disassembly": 2.3403905000013765,
+        "xref": 0.05131875000006403,
+        "function_recovery": 0.00477258400132996,
+        "cfg": 0.4680609999995795,
+        "xref_index": 0.10746741699767881,
+        "total": 2.976832291999017
+      },
+      "evidence_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+      "coverage": {
+        "status": "partial",
+        "functions": 690,
+        "xrefs": 28913,
+        "scanned_bytes": 1239360,
+        "xref_kinds": {
+          "call": 18,
+          "data": 13973,
+          "jmp": 14922
+        },
+        "function_sources": {
+          "direct_call": 1,
+          "eh_frame": 685,
+          "executable_region": 2,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "cfg_functions": 690,
+        "cfg_blocks": 22694,
+        "cfg_frontiers": 5,
+        "complete_function_cfgs": 685,
+        "full_analysis": true,
+        "full_coverage": {
+          "enabled": true,
+          "scope": "all_file_backed_executable_regions",
+          "executable_bytes": 1000880,
+          "decoded_bytes": 1000880,
+          "decode_complete": true,
+          "instruction_count": 255974,
+          "unassigned_instructions": 5538,
+          "function_recovery_complete": false,
+          "regions": [
+            {
+              "name": ".init",
+              "address": 8192,
+              "offset": 8192,
+              "size": 23,
+              "file_backed_size": 23,
+              "decoded_bytes": 23,
+              "instruction_count": 7,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt",
+              "address": 8224,
+              "offset": 8224,
+              "size": 192,
+              "file_backed_size": 192,
+              "decoded_bytes": 192,
+              "instruction_count": 36,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".plt.got",
+              "address": 8416,
+              "offset": 8416,
+              "size": 8,
+              "file_backed_size": 8,
+              "decoded_bytes": 8,
+              "instruction_count": 2,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".text",
+              "address": 8432,
+              "offset": 8432,
+              "size": 1000648,
+              "file_backed_size": 1000648,
+              "decoded_bytes": 1000648,
+              "instruction_count": 255926,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            },
+            {
+              "name": ".fini",
+              "address": 1009080,
+              "offset": 1009080,
+              "size": 9,
+              "file_backed_size": 9,
+              "decoded_bytes": 9,
+              "instruction_count": 3,
+              "gaps": [],
+              "complete": true,
+              "details_complete": true,
+              "cancelled": false,
+              "engine": "capstone"
+            }
+          ],
+          "xref_pass_complete": true,
+          "cfg_pass_complete": true,
+          "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+          "input_truncated": false
+        },
+        "full_instructions": 255974,
+        "full_decoded_bytes": 1000880,
+        "full_executable_bytes": 1000880,
+        "full_decode_complete": true,
+        "full_cfg_functions": 690,
+        "full_unassigned_instructions": 5538,
+        "full_function_sources": {
+          "executable_region": 2,
+          "eh_frame": 685,
+          "direct_call": 1,
+          "fini_array": 1,
+          "init_array": 1
+        },
+        "semantic_functions": 690,
+        "semantic_pending_symbols": null,
+        "semantic_instructions": 250436,
+        "semantic_partial_functions": 5,
+        "semantic_budget_exhausted": false,
+        "semantic_decoder": "capstone",
+        "semantic_cancelled": false,
+        "semantic_workers_requested": 4,
+        "semantic_workers_used": 4,
+        "semantic_parallel_functions": 690
+      }
+    }
+  },
+  "profiles": {
+    "one_worker_profiled_wall_seconds": 6.262234834000992,
+    "one_worker_profiled_phase_seconds": {
+      "disassembly": 4.723736874999304,
+      "xref": 0.16389829099716735,
+      "function_recovery": 0.012855791999754729,
+      "cfg": 1.2029972080017615,
+      "xref_index": 0.08506712500093272,
+      "total": 6.20065374999831
+    },
+    "one_worker_analyzer": {
+      "calls_profiled": 1,
+      "total_calls": 27186948,
+      "profiled_total_seconds": 6.2252638450000015,
+      "top_cumulative": [
+        {
+          "file": "_base.py",
+          "line": 428,
+          "function": "result",
+          "calls": 67,
+          "self_seconds": 0.000185452,
+          "cumulative_seconds": 6.225342417
+        },
+        {
+          "file": "threading.py",
+          "line": 327,
+          "function": "wait",
+          "calls": 68,
+          "self_seconds": 0.006338812,
+          "cumulative_seconds": 6.225341500000001
+        },
+        {
+          "file": "__init__.py",
+          "line": 38,
+          "function": "_analyze_with_stages",
+          "calls": 1,
+          "self_seconds": 0.004863628,
+          "cumulative_seconds": 6.215679875
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 145,
+          "function": "analyze_full",
+          "calls": 1,
+          "self_seconds": 0.027349268000000003,
+          "cumulative_seconds": 6.210676667
+        },
+        {
+          "file": "full_decode.py",
+          "line": 189,
+          "function": "stream_decode_regions",
+          "calls": 1,
+          "self_seconds": 0.077856347,
+          "cumulative_seconds": 4.721210125000001
+        },
+        {
+          "file": "full_decode.py",
+          "line": 84,
+          "function": "_decode_region",
+          "calls": 5,
+          "self_seconds": 0.155025195,
+          "cumulative_seconds": 4.604577917
+        },
+        {
+          "file": "decoder.py",
+          "line": 137,
+          "function": "decode_bytes_fast",
+          "calls": 20,
+          "self_seconds": 0.792148175,
+          "cumulative_seconds": 4.38217471
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 210,
+          "function": "cfg",
+          "calls": 690,
+          "self_seconds": 0.007784795000000001,
+          "cumulative_seconds": 1.196181114
+        },
+        {
+          "file": "semantic.py",
+          "line": 182,
+          "function": "_analyze_function",
+          "calls": 690,
+          "self_seconds": 0.66939174,
+          "cumulative_seconds": 1.1880301050000002
+        },
+        {
+          "file": "__init__.py",
+          "line": 780,
+          "function": "__getattr__",
+          "calls": 255995,
+          "self_seconds": 0.07551912000000001,
+          "cumulative_seconds": 1.048899166
+        },
+        {
+          "file": "__init__.py",
+          "line": 1163,
+          "function": "disasm",
+          "calls": 256117,
+          "self_seconds": 0.129027747,
+          "cumulative_seconds": 1.00179895
+        },
+        {
+          "file": "__init__.py",
+          "line": 728,
+          "function": "__gen_detail",
+          "calls": 255995,
+          "self_seconds": 0.188130197,
+          "cumulative_seconds": 0.973380046
+        },
+        {
+          "file": "__init__.py",
+          "line": 634,
+          "function": "__init__",
+          "calls": 256096,
+          "self_seconds": 0.576160428,
+          "cumulative_seconds": 0.8727468270000001
+        },
+        {
+          "file": "x86.py",
+          "line": 92,
+          "function": "get_arch_info",
+          "calls": 255995,
+          "self_seconds": 0.32198739800000004,
+          "cumulative_seconds": 0.785249849
+        },
+        {
+          "file": "__init__.py",
+          "line": 416,
+          "function": "copy_ctypes",
+          "calls": 757568,
+          "self_seconds": 0.44337459900000004,
+          "cumulative_seconds": 0.548977983
+        },
+        {
+          "file": "__init__.py",
+          "line": 422,
+          "function": "copy_ctypes_list",
+          "calls": 255995,
+          "self_seconds": 0.060030061,
+          "cumulative_seconds": 0.412113913
+        },
+        {
+          "file": "__init__.py",
+          "line": 886,
+          "function": "regs_access",
+          "calls": 256096,
+          "self_seconds": 0.33886248500000005,
+          "cumulative_seconds": 0.394537169
+        },
+        {
+          "file": "__init__.py",
+          "line": 801,
+          "function": "reg_name",
+          "calls": 614973,
+          "self_seconds": 0.210138927,
+          "cumulative_seconds": 0.323455188
+        },
+        {
+          "file": "xrefs.py",
+          "line": 99,
+          "function": "run",
+          "calls": 67,
+          "self_seconds": 0.00011202400000000001,
+          "cumulative_seconds": 0.246880498
+        },
+        {
+          "file": "decoder.py",
+          "line": 190,
+          "function": "<genexpr>",
+          "calls": 586999,
+          "self_seconds": 0.06826493800000001,
+          "cumulative_seconds": 0.244872154
+        },
+        {
+          "file": "thread.py",
+          "line": 54,
+          "function": "run",
+          "calls": 66,
+          "self_seconds": 8.7835e-05,
+          "cumulative_seconds": 0.244673252
+        },
+        {
+          "file": "xrefs.py",
+          "line": 107,
+          "function": "invoke",
+          "calls": 66,
+          "self_seconds": 0.0031954550000000003,
+          "cumulative_seconds": 0.244054121
+        },
+        {
+          "file": "decoder.py",
+          "line": 11,
+          "function": "branch_info",
+          "calls": 256096,
+          "self_seconds": 0.13497515200000001,
+          "cumulative_seconds": 0.226176386
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 32,
+          "function": "region",
+          "calls": 259963,
+          "self_seconds": 0.044485976,
+          "cumulative_seconds": 0.21087132700000003
+        },
+        {
+          "file": "decoder.py",
+          "line": 191,
+          "function": "<genexpr>",
+          "calls": 539667,
+          "self_seconds": 0.057238053000000004,
+          "cumulative_seconds": 0.20394825700000002
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of 'dict' objects>",
+          "calls": 3697259,
+          "self_seconds": 0.199978981,
+          "cumulative_seconds": 0.199978981
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.next>",
+          "calls": 276298,
+          "self_seconds": 0.030140664,
+          "cumulative_seconds": 0.174432745
+        },
+        {
+          "file": "decoder.py",
+          "line": 196,
+          "function": "<genexpr>",
+          "calls": 757430,
+          "self_seconds": 0.10825978600000001,
+          "cumulative_seconds": 0.169251897
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method _ctypes.byref>",
+          "calls": 3051757,
+          "self_seconds": 0.160453172,
+          "cumulative_seconds": 0.160453172
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 51,
+          "function": "_references",
+          "calls": 63,
+          "self_seconds": 0.10054315300000001,
+          "cumulative_seconds": 0.158997207
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 33,
+          "function": "<genexpr>",
+          "calls": 259963,
+          "self_seconds": 0.07719841200000001,
+          "cumulative_seconds": 0.13883341200000002
+        },
+        {
+          "file": "__init__.py",
+          "line": 666,
+          "function": "mnemonic",
+          "calls": 512192,
+          "self_seconds": 0.084437809,
+          "cumulative_seconds": 0.122978028
+        },
+        {
+          "file": "__init__.py",
+          "line": 628,
+          "function": "_ascii_name_or_default",
+          "calls": 614973,
+          "self_seconds": 0.067221978,
+          "cumulative_seconds": 0.113316261
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'decode' of 'bytes' objects>",
+          "calls": 1384309,
+          "self_seconds": 0.104419486,
+          "cumulative_seconds": 0.104419486
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'append' of 'list' objects>",
+          "calls": 1631406,
+          "self_seconds": 0.092207123,
+          "cumulative_seconds": 0.092207123
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'startswith' of 'str' objects>",
+          "calls": 1504385,
+          "self_seconds": 0.086631788,
+          "cumulative_seconds": 0.086631788
+        },
+        {
+          "file": "xrefs.py",
+          "line": 56,
+          "function": "index_references",
+          "calls": 1,
+          "self_seconds": 0.045935903,
+          "cumulative_seconds": 0.081851958
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 35,
+          "function": "decode",
+          "calls": 250437,
+          "self_seconds": 0.040649444,
+          "cumulative_seconds": 0.068436668
+        },
+        {
+          "file": "semantic.py",
+          "line": 39,
+          "function": "contains",
+          "calls": 1039831,
+          "self_seconds": 0.061635,
+          "cumulative_seconds": 0.061635
+        },
+        {
+          "file": "__init__.py",
+          "line": 675,
+          "function": "op_str",
+          "calls": 256096,
+          "self_seconds": 0.041352796000000004,
+          "cumulative_seconds": 0.06106106
+        }
+      ]
+    },
+    "default_profiled_wall_seconds": 6.138731374998315,
+    "default_profiled_phase_seconds": {
+      "disassembly": 4.6116593339975225,
+      "xref": 0.16015625,
+      "function_recovery": 0.013737084002059419,
+      "cfg": 1.142441082996811,
+      "xref_index": 0.1602644579979824,
+      "total": 6.098794249999628
+    },
+    "default_workers_analyzer": {
+      "calls_profiled": 1,
+      "total_calls": 27255565,
+      "profiled_total_seconds": 6.138142884999997,
+      "top_cumulative": [
+        {
+          "file": "_base.py",
+          "line": 263,
+          "function": "wait",
+          "calls": 85,
+          "self_seconds": 0.317793439,
+          "cumulative_seconds": 15.26577883
+        },
+        {
+          "file": "threading.py",
+          "line": 641,
+          "function": "wait",
+          "calls": 94,
+          "self_seconds": 0.300569957,
+          "cumulative_seconds": 7.861201171
+        },
+        {
+          "file": "_base.py",
+          "line": 428,
+          "function": "result",
+          "calls": 762,
+          "self_seconds": 0.000806794,
+          "cumulative_seconds": 6.138225459
+        },
+        {
+          "file": "threading.py",
+          "line": 327,
+          "function": "wait",
+          "calls": 619,
+          "self_seconds": 0.20436883600000003,
+          "cumulative_seconds": 6.138224500000001
+        },
+        {
+          "file": "__init__.py",
+          "line": 38,
+          "function": "_analyze_with_stages",
+          "calls": 1,
+          "self_seconds": 0.004838374,
+          "cumulative_seconds": 6.112951875
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 145,
+          "function": "analyze_full",
+          "calls": 1,
+          "self_seconds": 0.022797502,
+          "cumulative_seconds": 6.1075743330000005
+        },
+        {
+          "file": "thread.py",
+          "line": 220,
+          "function": "shutdown",
+          "calls": 2,
+          "self_seconds": 6.5000000000000004e-06,
+          "cumulative_seconds": 5.638180083
+        },
+        {
+          "file": "threading.py",
+          "line": 1056,
+          "function": "join",
+          "calls": 8,
+          "self_seconds": 9.043000000000001e-06,
+          "cumulative_seconds": 5.638160541
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'join' of '_thread._ThreadHandle' objects>",
+          "calls": 8,
+          "self_seconds": 6.9749e-05,
+          "cumulative_seconds": 5.638129791000001
+        },
+        {
+          "file": "full_decode.py",
+          "line": 189,
+          "function": "stream_decode_regions",
+          "calls": 1,
+          "self_seconds": 0.076065608,
+          "cumulative_seconds": 4.609151833
+        },
+        {
+          "file": "_base.py",
+          "line": 646,
+          "function": "__exit__",
+          "calls": 1,
+          "self_seconds": 1.542e-06,
+          "cumulative_seconds": 4.49622675
+        },
+        {
+          "file": "_base.py",
+          "line": 612,
+          "function": "result_iterator",
+          "calls": 777,
+          "self_seconds": 0.000324024,
+          "cumulative_seconds": 1.6117998660000001
+        },
+        {
+          "file": "_base.py",
+          "line": 314,
+          "function": "_result_or_cancel",
+          "calls": 690,
+          "self_seconds": 0.081810453,
+          "cumulative_seconds": 1.524573207
+        },
+        {
+          "file": "thread.py",
+          "line": 54,
+          "function": "run",
+          "calls": 761,
+          "self_seconds": 0.004334784,
+          "cumulative_seconds": 1.340794335
+        },
+        {
+          "file": "__init__.py",
+          "line": 780,
+          "function": "__getattr__",
+          "calls": 255995,
+          "self_seconds": 0.07099593600000001,
+          "cumulative_seconds": 1.022898362
+        },
+        {
+          "file": "__init__.py",
+          "line": 728,
+          "function": "__gen_detail",
+          "calls": 255995,
+          "self_seconds": 0.18124753300000002,
+          "cumulative_seconds": 0.951745092
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 210,
+          "function": "cfg",
+          "calls": 690,
+          "self_seconds": 0.007876018,
+          "cumulative_seconds": 0.916087274
+        },
+        {
+          "file": "__init__.py",
+          "line": 1163,
+          "function": "disasm",
+          "calls": 256117,
+          "self_seconds": 0.126286097,
+          "cumulative_seconds": 0.8874498540000001
+        },
+        {
+          "file": "x86.py",
+          "line": 92,
+          "function": "get_arch_info",
+          "calls": 255995,
+          "self_seconds": 0.31248077100000005,
+          "cumulative_seconds": 0.7704483080000001
+        },
+        {
+          "file": "__init__.py",
+          "line": 634,
+          "function": "__init__",
+          "calls": 256096,
+          "self_seconds": 0.465937319,
+          "cumulative_seconds": 0.7614268310000001
+        },
+        {
+          "file": "__init__.py",
+          "line": 416,
+          "function": "copy_ctypes",
+          "calls": 757568,
+          "self_seconds": 0.444346903,
+          "cumulative_seconds": 0.5465190830000001
+        },
+        {
+          "file": "decoder.py",
+          "line": 137,
+          "function": "decode_bytes_fast",
+          "calls": 20,
+          "self_seconds": 0.083760284,
+          "cumulative_seconds": 0.44788533300000005
+        },
+        {
+          "file": "__init__.py",
+          "line": 422,
+          "function": "copy_ctypes_list",
+          "calls": 255995,
+          "self_seconds": 0.058519242000000006,
+          "cumulative_seconds": 0.40769837600000003
+        },
+        {
+          "file": "semantic.py",
+          "line": 182,
+          "function": "_analyze_function",
+          "calls": 690,
+          "self_seconds": 0.402695048,
+          "cumulative_seconds": 0.401403497
+        },
+        {
+          "file": "__init__.py",
+          "line": 886,
+          "function": "regs_access",
+          "calls": 256096,
+          "self_seconds": 0.33479361300000005,
+          "cumulative_seconds": 0.387214229
+        },
+        {
+          "file": "__init__.py",
+          "line": 801,
+          "function": "reg_name",
+          "calls": 614973,
+          "self_seconds": 0.215336718,
+          "cumulative_seconds": 0.32811269200000004
+        },
+        {
+          "file": "xrefs.py",
+          "line": 99,
+          "function": "run",
+          "calls": 67,
+          "self_seconds": 0.00010574500000000001,
+          "cumulative_seconds": 0.318348126
+        },
+        {
+          "file": "xrefs.py",
+          "line": 107,
+          "function": "invoke",
+          "calls": 66,
+          "self_seconds": 0.0026959920000000004,
+          "cumulative_seconds": 0.304970161
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 32,
+          "function": "region",
+          "calls": 259963,
+          "self_seconds": 0.045080574000000005,
+          "cumulative_seconds": 0.262204163
+        },
+        {
+          "file": "decoder.py",
+          "line": 190,
+          "function": "<genexpr>",
+          "calls": 586999,
+          "self_seconds": 0.066554165,
+          "cumulative_seconds": 0.245204938
+        },
+        {
+          "file": "decoder.py",
+          "line": 11,
+          "function": "branch_info",
+          "calls": 256096,
+          "self_seconds": 0.13358372300000002,
+          "cumulative_seconds": 0.22218690900000002
+        },
+        {
+          "file": "decoder.py",
+          "line": 191,
+          "function": "<genexpr>",
+          "calls": 539667,
+          "self_seconds": 0.055802762000000006,
+          "cumulative_seconds": 0.205162851
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of 'dict' objects>",
+          "calls": 3697579,
+          "self_seconds": 0.195014766,
+          "cumulative_seconds": 0.195014766
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.next>",
+          "calls": 276300,
+          "self_seconds": 0.035015129,
+          "cumulative_seconds": 0.189997886
+        },
+        {
+          "file": "decoder.py",
+          "line": 196,
+          "function": "<genexpr>",
+          "calls": 757430,
+          "self_seconds": 0.10275571800000001,
+          "cumulative_seconds": 0.161960569
+        },
+        {
+          "file": "xrefs.py",
+          "line": 56,
+          "function": "index_references",
+          "calls": 1,
+          "self_seconds": 0.12066515600000001,
+          "cumulative_seconds": 0.157575625
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method _ctypes.byref>",
+          "calls": 3051757,
+          "self_seconds": 0.153365853,
+          "cumulative_seconds": 0.153365853
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 51,
+          "function": "_references",
+          "calls": 63,
+          "self_seconds": 0.087946942,
+          "cumulative_seconds": 0.144687211
+        },
+        {
+          "file": "full_analysis.py",
+          "line": 33,
+          "function": "<genexpr>",
+          "calls": 259963,
+          "self_seconds": 0.07638101800000001,
+          "cumulative_seconds": 0.132643024
+        },
+        {
+          "file": "__init__.py",
+          "line": 666,
+          "function": "mnemonic",
+          "calls": 512192,
+          "self_seconds": 0.081788145,
+          "cumulative_seconds": 0.119502781
+        }
+      ]
+    }
+  },
+  "same_evidence": true,
+  "notes": [
+    "阶段计时来自未插桩的正常服务；另列 cProfile 测量被 profiler 放大，不应当作用户实际耗时。",
+    "CPython 3.13 cProfile 一次只允许一项活动采集器；本报告每种设置分别启用一个 analyzer 采集器；线程交错时 cumulative 树不等同独立阶段墙钟，阶段判断以无插桩 phase_seconds 为准。",
+    "源文件、IR/CFG/xref 范围和 evidence digest 完全一致才允许性能比较。"
+  ],
+  "decoder_optimization": {
+    "changes": [
+      "寄存器名称按单个私有 decoder 批次缓存，保留逐指令 regs_access",
+      "mnemonic、address、size 单条读取一次",
+      "架构与 TLS 段常量配置移到循环外"
+    ],
+    "measurement_scope": "同一服务进程交替替换旧/新 fast 函数，其余引擎与分析范围完全相同；1 个解码 worker、1 个独立 xref worker",
+    "measurements": {
+      "before": {
+        "runs": [
+          {
+            "round": 1,
+            "wall_seconds": 2.9599620000008144,
+            "phase_seconds": {
+              "disassembly": 2.313881958998536,
+              "xref": 0.050988417002372444,
+              "function_recovery": 0.005067707999842241,
+              "cfg": 0.443581625000661,
+              "xref_index": 0.11531458299941733,
+              "total": 2.939558209000097
+            }
+          },
+          {
+            "round": 2,
+            "wall_seconds": 3.059709124998335,
+            "phase_seconds": {
+              "disassembly": 2.3571302500022284,
+              "xref": 0.05861150000055204,
+              "function_recovery": 0.005124541999975918,
+              "cfg": 0.47862416700081667,
+              "xref_index": 0.12235108299864805,
+              "total": 3.0382483749999665
+            }
+          },
+          {
+            "round": 3,
+            "wall_seconds": 3.0309727499989094,
+            "phase_seconds": {
+              "disassembly": 2.378490208000585,
+              "xref": 0.0498544160000165,
+              "function_recovery": 0.004750874999444932,
+              "cfg": 0.4454630840009486,
+              "xref_index": 0.11544766700171749,
+              "total": 3.0098449170000094
+            }
+          }
+        ],
+        "median_wall_seconds": 3.0309727499989094,
+        "median_disassembly_seconds": 2.3571302500022284,
+        "evidence_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+        "coverage": {
+          "status": "partial",
+          "functions": 690,
+          "xrefs": 28913,
+          "scanned_bytes": 1239360,
+          "xref_kinds": {
+            "call": 18,
+            "data": 13973,
+            "jmp": 14922
+          },
+          "function_sources": {
+            "direct_call": 1,
+            "eh_frame": 685,
+            "executable_region": 2,
+            "fini_array": 1,
+            "init_array": 1
+          },
+          "cfg_functions": 690,
+          "cfg_blocks": 22694,
+          "cfg_frontiers": 5,
+          "complete_function_cfgs": 685,
+          "full_analysis": true,
+          "full_coverage": {
+            "enabled": true,
+            "scope": "all_file_backed_executable_regions",
+            "executable_bytes": 1000880,
+            "decoded_bytes": 1000880,
+            "decode_complete": true,
+            "instruction_count": 255974,
+            "unassigned_instructions": 5538,
+            "function_recovery_complete": false,
+            "regions": [
+              {
+                "name": ".init",
+                "address": 8192,
+                "offset": 8192,
+                "size": 23,
+                "file_backed_size": 23,
+                "decoded_bytes": 23,
+                "instruction_count": 7,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".plt",
+                "address": 8224,
+                "offset": 8224,
+                "size": 192,
+                "file_backed_size": 192,
+                "decoded_bytes": 192,
+                "instruction_count": 36,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".plt.got",
+                "address": 8416,
+                "offset": 8416,
+                "size": 8,
+                "file_backed_size": 8,
+                "decoded_bytes": 8,
+                "instruction_count": 2,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".text",
+                "address": 8432,
+                "offset": 8432,
+                "size": 1000648,
+                "file_backed_size": 1000648,
+                "decoded_bytes": 1000648,
+                "instruction_count": 255926,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".fini",
+                "address": 1009080,
+                "offset": 1009080,
+                "size": 9,
+                "file_backed_size": 9,
+                "decoded_bytes": 9,
+                "instruction_count": 3,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              }
+            ],
+            "xref_pass_complete": true,
+            "cfg_pass_complete": true,
+            "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+            "input_truncated": false
+          },
+          "full_instructions": 255974,
+          "full_decoded_bytes": 1000880,
+          "full_executable_bytes": 1000880,
+          "full_decode_complete": true,
+          "full_cfg_functions": 690,
+          "full_unassigned_instructions": 5538,
+          "full_function_sources": {
+            "executable_region": 2,
+            "eh_frame": 685,
+            "direct_call": 1,
+            "fini_array": 1,
+            "init_array": 1
+          },
+          "semantic_functions": 690,
+          "semantic_pending_symbols": null,
+          "semantic_instructions": 250436,
+          "semantic_partial_functions": 5,
+          "semantic_budget_exhausted": false,
+          "semantic_decoder": "capstone",
+          "semantic_cancelled": false,
+          "semantic_workers_requested": 1,
+          "semantic_workers_used": 1,
+          "semantic_parallel_functions": 0
+        }
+      },
+      "after": {
+        "runs": [
+          {
+            "round": 1,
+            "wall_seconds": 2.74810745799914,
+            "phase_seconds": {
+              "disassembly": 2.105495042000257,
+              "xref": 0.050300915998377604,
+              "function_recovery": 0.004634291999536799,
+              "cfg": 0.4493786249986442,
+              "xref_index": 0.10663166700032889,
+              "total": 2.727638875003322
+            }
+          },
+          {
+            "round": 2,
+            "wall_seconds": 2.770608541999536,
+            "phase_seconds": {
+              "disassembly": 2.099868833000073,
+              "xref": 0.06124279199866578,
+              "function_recovery": 0.005081499999505468,
+              "cfg": 0.45203274999948917,
+              "xref_index": 0.12002845800088835,
+              "total": 2.750008999999409
+            }
+          },
+          {
+            "round": 3,
+            "wall_seconds": 2.9667119580008148,
+            "phase_seconds": {
+              "disassembly": 2.2794272500032093,
+              "xref": 0.0542597920029948,
+              "function_recovery": 0.005364458997064503,
+              "cfg": 0.5473561250000785,
+              "xref_index": 0.04490475000056904,
+              "total": 2.9433804580003198
+            }
+          }
+        ],
+        "median_wall_seconds": 2.770608541999536,
+        "median_disassembly_seconds": 2.105495042000257,
+        "evidence_digest": "5057b1f042de168db4ae535a52b3f82e635e16ee29950b8b95107fcb68de1e64",
+        "coverage": {
+          "status": "partial",
+          "functions": 690,
+          "xrefs": 28913,
+          "scanned_bytes": 1239360,
+          "xref_kinds": {
+            "call": 18,
+            "data": 13973,
+            "jmp": 14922
+          },
+          "function_sources": {
+            "direct_call": 1,
+            "eh_frame": 685,
+            "executable_region": 2,
+            "fini_array": 1,
+            "init_array": 1
+          },
+          "cfg_functions": 690,
+          "cfg_blocks": 22694,
+          "cfg_frontiers": 5,
+          "complete_function_cfgs": 685,
+          "full_analysis": true,
+          "full_coverage": {
+            "enabled": true,
+            "scope": "all_file_backed_executable_regions",
+            "executable_bytes": 1000880,
+            "decoded_bytes": 1000880,
+            "decode_complete": true,
+            "instruction_count": 255974,
+            "unassigned_instructions": 5538,
+            "function_recovery_complete": false,
+            "regions": [
+              {
+                "name": ".init",
+                "address": 8192,
+                "offset": 8192,
+                "size": 23,
+                "file_backed_size": 23,
+                "decoded_bytes": 23,
+                "instruction_count": 7,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".plt",
+                "address": 8224,
+                "offset": 8224,
+                "size": 192,
+                "file_backed_size": 192,
+                "decoded_bytes": 192,
+                "instruction_count": 36,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".plt.got",
+                "address": 8416,
+                "offset": 8416,
+                "size": 8,
+                "file_backed_size": 8,
+                "decoded_bytes": 8,
+                "instruction_count": 2,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".text",
+                "address": 8432,
+                "offset": 8432,
+                "size": 1000648,
+                "file_backed_size": 1000648,
+                "decoded_bytes": 1000648,
+                "instruction_count": 255926,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              },
+              {
+                "name": ".fini",
+                "address": 1009080,
+                "offset": 1009080,
+                "size": 9,
+                "file_backed_size": 9,
+                "decoded_bytes": 9,
+                "instruction_count": 3,
+                "gaps": [],
+                "complete": true,
+                "details_complete": true,
+                "cancelled": false,
+                "engine": "capstone"
+              }
+            ],
+            "xref_pass_complete": true,
+            "cfg_pass_complete": true,
+            "xref_scope": "direct_control_flow_and_resolved_pc_relative_memory",
+            "input_truncated": false
+          },
+          "full_instructions": 255974,
+          "full_decoded_bytes": 1000880,
+          "full_executable_bytes": 1000880,
+          "full_decode_complete": true,
+          "full_cfg_functions": 690,
+          "full_unassigned_instructions": 5538,
+          "full_function_sources": {
+            "executable_region": 2,
+            "eh_frame": 685,
+            "direct_call": 1,
+            "fini_array": 1,
+            "init_array": 1
+          },
+          "semantic_functions": 690,
+          "semantic_pending_symbols": null,
+          "semantic_instructions": 250436,
+          "semantic_partial_functions": 5,
+          "semantic_budget_exhausted": false,
+          "semantic_decoder": "capstone",
+          "semantic_cancelled": false,
+          "semantic_workers_requested": 1,
+          "semantic_workers_used": 1,
+          "semantic_parallel_functions": 0
+        }
+      }
+    },
+    "same_evidence": true,
+    "matches_initial_evidence": true,
+    "improvement_percent": 8.590120382951875,
+    "profiled_reg_name_calls": 604,
+    "profiled_regs_access_calls": 256096
+  }
+}

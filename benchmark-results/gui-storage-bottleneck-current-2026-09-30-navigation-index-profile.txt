@@ -1,0 +1,84 @@
+此输出用于归因。cProfile 会扰动速度，不应与无插桩样本比较。
+
+         11926524 function calls in 1.492 seconds
+
+   Ordered by: cumulative time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.203    0.203    1.504    1.504 navigation.py:189(__init__)
+    23384    0.295    0.000    0.640    0.000 navigation.py:302(_function_ranges)
+        1    0.024    0.024    0.412    0.412 navigation.py:346(_index_cfgs)
+  1461286    0.147    0.000    0.300    0.000 {built-in method builtins.isinstance}
+   289739    0.119    0.000    0.247    0.000 navigation.py:140(_record_context)
+  3182952    0.157    0.000    0.157    0.000 {method 'get' of 'dict' objects}
+  1218584    0.092    0.000    0.153    0.000 <frozen abc>:117(__instancecheck__)
+    33075    0.042    0.000    0.153    0.000 navigation.py:263(_row_locations)
+  1343210    0.113    0.000    0.113    0.000 navigation.py:136(_address)
+    85400    0.026    0.000    0.075    0.000 <string>:2(__init__)
+  1218584    0.062    0.000    0.062    0.000 {built-in method _abc._abc_instancecheck}
+  1017200    0.054    0.000    0.054    0.000 {method 'append' of 'list' objects}
+    85400    0.029    0.000    0.049    0.000 navigation.py:32(__post_init__)
+    23390    0.035    0.000    0.048    0.000 {method 'sort' of 'list' objects}
+   143916    0.016    0.000    0.022    0.000 navigation.py:20(_space)
+   524314    0.019    0.000    0.019    0.000 {built-in method builtins.max}
+   103754    0.010    0.000    0.014    0.000 <string>:24(__hash__)
+   315550    0.013    0.000    0.013    0.000 navigation.py:254(<lambda>)
+   315556    0.012    0.000    0.012    0.000 navigation.py:257(<genexpr>)
+     2426    0.001    0.000    0.010    0.000 navigation.py:291(location_for_row)
+   315556    0.010    0.000    0.010    0.000 navigation.py:256(<genexpr>)
+        4    0.004    0.001    0.007    0.002 navigation.py:160(__init__)
+   103754    0.004    0.000    0.004    0.000 {built-in method builtins.hash}
+    48504    0.003    0.000    0.003    0.000 {built-in method builtins.len}
+    23384    0.002    0.000    0.002    0.000 {method 'extend' of 'list' objects}
+    14658    0.001    0.000    0.001    0.000 <string>:10(__eq__)
+    28075    0.001    0.000    0.001    0.000 navigation.py:163(<genexpr>)
+        4    0.000    0.000    0.000    0.000 {built-in method builtins.sorted}
+     2426    0.000    0.000    0.000    0.000 {built-in method builtins.next}
+     2426    0.000    0.000    0.000    0.000 navigation.py:300(<genexpr>)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 navigation.py:478(_index_references)
+        7    0.000    0.000    0.000    0.000 {method 'items' of 'dict' objects}
+        2    0.000    0.000    0.000    0.000 navigation.py:195(<lambda>)
+
+
+         11926524 function calls in 1.492 seconds
+
+   Ordered by: internal time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    23384    0.295    0.000    0.640    0.000 navigation.py:302(_function_ranges)
+        1    0.203    0.203    1.504    1.504 navigation.py:189(__init__)
+  3182952    0.157    0.000    0.157    0.000 {method 'get' of 'dict' objects}
+  1461286    0.147    0.000    0.300    0.000 {built-in method builtins.isinstance}
+   289739    0.119    0.000    0.247    0.000 navigation.py:140(_record_context)
+  1343210    0.113    0.000    0.113    0.000 navigation.py:136(_address)
+  1218584    0.092    0.000    0.153    0.000 <frozen abc>:117(__instancecheck__)
+  1218584    0.062    0.000    0.062    0.000 {built-in method _abc._abc_instancecheck}
+  1017200    0.054    0.000    0.054    0.000 {method 'append' of 'list' objects}
+    33075    0.042    0.000    0.153    0.000 navigation.py:263(_row_locations)
+    23390    0.035    0.000    0.048    0.000 {method 'sort' of 'list' objects}
+    85400    0.029    0.000    0.049    0.000 navigation.py:32(__post_init__)
+    85400    0.026    0.000    0.075    0.000 <string>:2(__init__)
+        1    0.024    0.024    0.412    0.412 navigation.py:346(_index_cfgs)
+   524314    0.019    0.000    0.019    0.000 {built-in method builtins.max}
+   143916    0.016    0.000    0.022    0.000 navigation.py:20(_space)
+   315550    0.013    0.000    0.013    0.000 navigation.py:254(<lambda>)
+   315556    0.012    0.000    0.012    0.000 navigation.py:257(<genexpr>)
+   103754    0.010    0.000    0.014    0.000 <string>:24(__hash__)
+   315556    0.010    0.000    0.010    0.000 navigation.py:256(<genexpr>)
+   103754    0.004    0.000    0.004    0.000 {built-in method builtins.hash}
+        4    0.004    0.001    0.007    0.002 navigation.py:160(__init__)
+    48504    0.003    0.000    0.003    0.000 {built-in method builtins.len}
+    23384    0.002    0.000    0.002    0.000 {method 'extend' of 'list' objects}
+     2426    0.001    0.000    0.010    0.000 navigation.py:291(location_for_row)
+    14658    0.001    0.000    0.001    0.000 <string>:10(__eq__)
+    28075    0.001    0.000    0.001    0.000 navigation.py:163(<genexpr>)
+        4    0.000    0.000    0.000    0.000 {built-in method builtins.sorted}
+     2426    0.000    0.000    0.000    0.000 {built-in method builtins.next}
+     2426    0.000    0.000    0.000    0.000 navigation.py:300(<genexpr>)
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.000    0.000 navigation.py:478(_index_references)
+        7    0.000    0.000    0.000    0.000 {method 'items' of 'dict' objects}
+        2    0.000    0.000    0.000    0.000 navigation.py:195(<lambda>)
+
+

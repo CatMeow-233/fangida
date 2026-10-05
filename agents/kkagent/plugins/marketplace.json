@@ -1,0 +1,65 @@
+{
+  "version": "1",
+  "plugins": [
+    {
+      "id": "kk-weather",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Weather",
+      "version": "1.0.0",
+      "description": "Official example datasource plugin (weather lookup via public API).",
+      "keywords": ["data", "weather", "example"],
+      "source": "./official/kk-weather"
+    },
+    {
+      "id": "kk-browser",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Browser",
+      "version": "1.0.0",
+      "description": "Official example browser-control plugin (headless Chromium via MCP).",
+      "keywords": ["browser", "automation", "cdp", "example"],
+      "source": "./official/kk-browser"
+    },
+    {
+      "id": "kk-web-override",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Web Override",
+      "version": "1.0.0",
+      "description": "Official example override plugin: replaces the built-in Web tool via toolOverrides and adds a full slash command.",
+      "keywords": ["override", "web", "slash-command", "example"],
+      "source": "./official/kk-web-override"
+    },
+    {
+      "id": "kk-web-brave",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Web via Brave",
+      "version": "1.0.0",
+      "description": "Official example service-override plugin: points the built-in Web tool at Brave Search without MCP.",
+      "keywords": ["override", "services", "web", "no-mcp", "example"],
+      "source": "./official/kk-web-brave"
+    },
+    {
+      "id": "kk-cursor-agent",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Cursor Agent",
+      "version": "1.0.0",
+      "description": "Official example external-subagent plugin: registers the Cursor CLI (`agent acp`, ACP) as a delegatable subagent type.",
+      "keywords": ["subagent", "acp", "cursor", "example"],
+      "source": "./official/kk-cursor-agent"
+    },
+    {
+      "id": "kk-wiki-agent",
+      "type": "plugin",
+      "tier": "official",
+      "displayName": "KK Wiki Agent",
+      "version": "1.0.0",
+      "description": "Official example internal-subagent plugin: kk model + tool allowlist + plugin-private lazy MCP for wiki lookup.",
+      "keywords": ["subagent", "internal", "mcp", "wiki", "example"],
+      "source": "./official/kk-wiki-agent"
+    }
+  ]
+}

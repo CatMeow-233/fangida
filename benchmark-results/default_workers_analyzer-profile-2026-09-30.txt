@@ -1,0 +1,96 @@
+         27255565 function calls (27201447 primitive calls) in 6.138 seconds
+
+   Ordered by: cumulative time
+   List reduced from 891 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       85    0.318    0.004   15.266    0.180 _base.py:263(wait)
+       94    0.301    0.003    7.861    0.084 threading.py:641(wait)
+    762/1    0.001    0.000    6.138    6.138 _base.py:428(result)
+    619/1    0.204    0.000    6.138    6.138 threading.py:327(wait)
+        1    0.005    0.005    6.113    6.113 __init__.py:38(_analyze_with_stages)
+        1    0.023    0.023    6.108    6.108 full_analysis.py:145(analyze_full)
+        2    0.000    0.000    5.638    2.819 thread.py:220(shutdown)
+        8    0.000    0.000    5.638    0.705 threading.py:1056(join)
+        8    0.000    0.000    5.638    0.705 {method 'join' of '_thread._ThreadHandle' objects}
+        1    0.076    0.076    4.609    4.609 full_decode.py:189(stream_decode_regions)
+        1    0.000    0.000    4.496    4.496 _base.py:646(__exit__)
+      777    0.000    0.000    1.612    0.002 _base.py:612(result_iterator)
+      690    0.082    0.000    1.525    0.002 _base.py:314(_result_or_cancel)
+  761/655    0.004    0.000    1.341    0.002 thread.py:54(run)
+   255995    0.071    0.000    1.023    0.000 __init__.py:780(__getattr__)
+   255995    0.181    0.000    0.952    0.000 __init__.py:728(__gen_detail)
+  690/590    0.008    0.000    0.916    0.002 full_analysis.py:210(cfg)
+256117/256070    0.126    0.000    0.887    0.000 __init__.py:1163(disasm)
+   255995    0.312    0.000    0.770    0.000 x86.py:92(get_arch_info)
+256096/256084    0.466    0.000    0.761    0.000 __init__.py:634(__init__)
+757568/757562    0.444    0.000    0.547    0.000 __init__.py:416(copy_ctypes)
+    20/16    0.084    0.004    0.448    0.028 decoder.py:137(decode_bytes_fast)
+   255995    0.059    0.000    0.408    0.000 __init__.py:422(copy_ctypes_list)
+  690/590    0.403    0.001    0.401    0.001 semantic.py:182(_analyze_function)
+   256096    0.335    0.000    0.387    0.000 __init__.py:886(regs_access)
+614973/614951    0.215    0.000    0.328    0.000 __init__.py:801(reg_name)
+    67/66    0.000    0.000    0.318    0.005 xrefs.py:99(run)
+       66    0.003    0.000    0.305    0.005 xrefs.py:107(invoke)
+259963/242329    0.045    0.000    0.262    0.000 full_analysis.py:32(region)
+586999/586965    0.067    0.000    0.245    0.000 decoder.py:190(<genexpr>)
+   256096    0.134    0.000    0.222    0.000 decoder.py:11(branch_info)
+539667/539665    0.056    0.000    0.205    0.000 decoder.py:191(<genexpr>)
+  3697579    0.195    0.000    0.195    0.000 {method 'get' of 'dict' objects}
+276300/258666    0.035    0.000    0.190    0.000 {built-in method builtins.next}
+   757430    0.103    0.000    0.162    0.000 decoder.py:196(<genexpr>)
+        1    0.121    0.121    0.158    0.158 xrefs.py:56(index_references)
+  3051757    0.153    0.000    0.153    0.000 {built-in method _ctypes.byref}
+       63    0.088    0.001    0.145    0.002 full_analysis.py:51(_references)
+259963/251864    0.076    0.000    0.133    0.000 full_analysis.py:33(<genexpr>)
+   512192    0.082    0.000    0.120    0.000 __init__.py:666(mnemonic)
+
+
+         27255565 function calls (27201447 primitive calls) in 6.138 seconds
+
+   Ordered by: internal time
+   List reduced from 891 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+256096/256084    0.466    0.000    0.761    0.000 __init__.py:634(__init__)
+757568/757562    0.444    0.000    0.547    0.000 __init__.py:416(copy_ctypes)
+  690/590    0.403    0.001    0.401    0.001 semantic.py:182(_analyze_function)
+   256096    0.335    0.000    0.387    0.000 __init__.py:886(regs_access)
+       85    0.318    0.004   15.266    0.180 _base.py:263(wait)
+   255995    0.312    0.000    0.770    0.000 x86.py:92(get_arch_info)
+       94    0.301    0.003    7.861    0.084 threading.py:641(wait)
+614973/614951    0.215    0.000    0.328    0.000 __init__.py:801(reg_name)
+    619/1    0.204    0.000    6.138    6.138 threading.py:327(wait)
+  3697579    0.195    0.000    0.195    0.000 {method 'get' of 'dict' objects}
+   255995    0.181    0.000    0.952    0.000 __init__.py:728(__gen_detail)
+  3051757    0.153    0.000    0.153    0.000 {built-in method _ctypes.byref}
+   2626/2    0.134    0.000    0.000    0.000 {method 'acquire' of '_thread.lock' objects}
+   256096    0.134    0.000    0.222    0.000 decoder.py:11(branch_info)
+256117/256070    0.126    0.000    0.887    0.000 __init__.py:1163(disasm)
+        1    0.121    0.121    0.158    0.158 xrefs.py:56(index_references)
+  1384317    0.103    0.000    0.103    0.000 {method 'decode' of 'bytes' objects}
+   757430    0.103    0.000    0.162    0.000 decoder.py:196(<genexpr>)
+  1632555    0.090    0.000    0.090    0.000 {method 'append' of 'list' objects}
+       63    0.088    0.001    0.145    0.002 full_analysis.py:51(_references)
+  1505730    0.085    0.000    0.085    0.000 {method 'startswith' of 'str' objects}
+    20/16    0.084    0.004    0.448    0.028 decoder.py:137(decode_bytes_fast)
+      690    0.082    0.000    1.525    0.002 _base.py:314(_result_or_cancel)
+   512192    0.082    0.000    0.120    0.000 __init__.py:666(mnemonic)
+   420/65    0.077    0.000    0.000    0.000 {method 'get' of '_queue.SimpleQueue' objects}
+259963/251864    0.076    0.000    0.133    0.000 full_analysis.py:33(<genexpr>)
+        1    0.076    0.076    4.609    4.609 full_decode.py:189(stream_decode_regions)
+   255995    0.071    0.000    1.023    0.000 __init__.py:780(__getattr__)
+   614973    0.067    0.000    0.113    0.000 __init__.py:628(_ascii_name_or_default)
+586999/586965    0.067    0.000    0.245    0.000 decoder.py:190(<genexpr>)
+  1039831    0.061    0.000    0.061    0.000 semantic.py:39(contains)
+  1005197    0.059    0.000    0.059    0.000 {method 'strip' of 'str' objects}
+   255995    0.059    0.000    0.408    0.000 __init__.py:422(copy_ctypes_list)
+539667/539665    0.056    0.000    0.205    0.000 decoder.py:191(<genexpr>)
+   256096    0.053    0.000    0.053    0.000 {built-in method _ctypes.pointer}
+  1013702    0.047    0.000    0.047    0.000 {built-in method _ctypes.sizeof}
+259963/242329    0.045    0.000    0.262    0.000 full_analysis.py:32(region)
+   256096    0.041    0.000    0.061    0.000 __init__.py:675(op_str)
+250437/247283    0.040    0.000    0.065    0.000 full_analysis.py:35(decode)
+276300/258666    0.035    0.000    0.190    0.000 {built-in method builtins.next}
+
+

@@ -1,0 +1,32 @@
+         1004176 function calls in 0.126 seconds
+
+   Ordered by: cumulative time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       63    0.060    0.001    0.094    0.001 full_analysis.py:69(_references)
+   885956    0.037    0.000    0.037    0.000 {method 'get' of 'dict' objects}
+        1    0.022    0.022    0.031    0.031 xrefs.py:56(index_references)
+    59034    0.003    0.000    0.003    0.000 {method 'append' of 'list' objects}
+    30121    0.002    0.000    0.002    0.000 {method 'setdefault' of 'dict' objects}
+       66    0.001    0.000    0.001    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+    28933    0.001    0.000    0.001    0.000 {built-in method builtins.isinstance}
+        1    0.000    0.000    0.000    0.000 xrefs.py:19(direct_references)
+        1    0.000    0.000    0.000    0.000 xrefs.py:84(index_entry_references)
+
+
+         1004176 function calls in 0.126 seconds
+
+   Ordered by: internal time
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       63    0.060    0.001    0.094    0.001 full_analysis.py:69(_references)
+   885956    0.037    0.000    0.037    0.000 {method 'get' of 'dict' objects}
+        1    0.022    0.022    0.031    0.031 xrefs.py:56(index_references)
+    59034    0.003    0.000    0.003    0.000 {method 'append' of 'list' objects}
+    30121    0.002    0.000    0.002    0.000 {method 'setdefault' of 'dict' objects}
+       66    0.001    0.000    0.001    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+    28933    0.001    0.000    0.001    0.000 {built-in method builtins.isinstance}
+        1    0.000    0.000    0.000    0.000 xrefs.py:19(direct_references)
+        1    0.000    0.000    0.000    0.000 xrefs.py:84(index_entry_references)
+
+

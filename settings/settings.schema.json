@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fangida settings",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "worker_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+    "max_archive_entries": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "max_archive_uncompressed_bytes": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "io_threads": {"type": "integer", "minimum": 1, "maximum": 64},
+    "parse_threads": {"type": "integer", "minimum": 1, "maximum": 64},
+    "analyze_threads": {"type": "integer", "minimum": 1, "maximum": 64},
+    "native_threads": {"type": "integer", "minimum": 1, "maximum": 64},
+    "semantic_threads": {"type": "integer", "minimum": 1, "maximum": 16},
+    "mcp_allow_writes": {"type": "boolean"},
+    "ghidra_enabled": {"type": "boolean"},
+    "ghidra_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+    "ghidra_max_cpu": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "ghidra_decompiled_functions": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "ghidra_decompile_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+    "deep_analysis": {"type": "boolean"},
+    "semantic_max_functions": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "semantic_max_instructions": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+    "full_analysis": {"type": "boolean"},
+    "pseudoc_max_instructions": {"type": "integer", "minimum": 1, "maximum": 8192}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "source_database": "/Users/meow233/Desktop/ai/fangida-0.4.0/analysis-databases/challenge-verified.fdb",
+  "snapshot_to_view_seconds": 2.1576996670009976,
+  "snapshot_to_view_cpu_seconds": 2.1505739999999998,
+  "gui_prepare_seconds": 2.201008041000023,
+  "gui_prepare_cpu_seconds": 2.185956,
+  "total_before_render_seconds": 4.35870770800102,
+  "table_counts": {
+    "Sections": 30,
+    "Functions": 690,
+    "Disassembly": 1000,
+    "Strings": 1000,
+    "Imports": 16,
+    "Exports": 0,
+    "Xrefs": 28913
+  },
+  "instructions": 255974,
+  "rss_lifetime_peak_bytes": 973733888
+}
