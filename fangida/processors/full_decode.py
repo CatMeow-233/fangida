@@ -44,6 +44,7 @@ _INVALID_MNEMONICS = {"(bad)", "bad", "<unknown>", "invalid", "db", "dw", "dd", 
 # 跨越重同步锚点而被丢弃的指令字节（[指令起点, 锚点)）在覆盖记录中的缺口原因。
 ANCHOR_RESYNC = _decode_worker.ANCHOR_RESYNC
 _following_anchor = _decode_worker.following_anchor
+_share_dict = _decode_worker._share_dict
 
 
 def _append_warning(warnings: list[str], message: str) -> None:
@@ -180,6 +181,15 @@ def _decode_region(
             _append_warning(warnings, warning)
         builtin = type(processor) is NativeDecoder
         decode = processor.decode_bytes_fast if builtin else processor.decode_bytes
+        # 未被替换的内置快路径：记录在区域内按值共享只读子对象（与进程路径的 share_records
+        # 同样的值共享，值与键顺序逐字不变）。只做廉价的部分：助记符、空 branch_info、
+        # arch_meta（只含 engine/architecture 的二键字典直接比较，其余按值共享）；
+        # 共享表属于本次调用（一个区域、一个线程），线程之间不共享任何对象。
+        share = builtin and getattr(decode, "__func__", None) is _BUILTIN_FAST
+        shared_mnemonics: dict[str, str] = {}
+        shared_meta: dict[Any, Any] = {}
+        empty_branch: dict[str, Any] = {}
+        plain_meta: dict[str, Any] | None = None
         # 内置 Capstone 快路径在 GIL 下是纯 CPU 绑定，且每条指令有多次释放 GIL 的 ctypes
         # 调用；多个区域线程并发只会产生 GIL 交接开销。按窗口互斥以消除争用，
         # 每个区域仍由各自的私有处理器和线程解码。注册的处理器不受影响。
@@ -261,6 +271,19 @@ def _decode_region(
                         break
                 if relative > cursor:
                     _gap(coverage, cursor, relative - cursor, "undecodable")
+                if share:
+                    instruction["mnemonic"] = shared_mnemonics.setdefault(mnemonic, mnemonic)
+                    if not instruction["branch_info"]:
+                        instruction["branch_info"] = empty_branch
+                    metadata = instruction["arch_meta"]
+                    if len(metadata) == 2:
+                        # 内置解码器的二键 arch_meta 只有 {"engine", "architecture"} 一种形状。
+                        if plain_meta is None:
+                            plain_meta = metadata
+                        elif metadata == plain_meta:
+                            instruction["arch_meta"] = plain_meta
+                    else:
+                        instruction["arch_meta"] = _share_dict(shared_meta, "arch_meta", metadata)
                 records[address] = instruction
                 decoded += size
                 cursor = relative + size
@@ -369,7 +392,8 @@ def _process_processor(image: Any) -> NativeDecoder | None:
 
 def _on_path(piece: tuple[Any, ...], start: int, cursor: int, base: int, step: int) -> bool:
     """Whether the piece's own sweep visits ``cursor`` (start, event ends, gap steps)."""
-    addrs, _, gaps, end = piece
+    # 子进程的块可带第 5 项（ROWS）：这里只用地址、缺口与结束游标。
+    addrs, gaps, end = piece[0], piece[2], piece[3]
     if cursor == start or cursor == end:
         return True
     if not start < cursor < end:
@@ -407,6 +431,8 @@ class _ProcessRegion:
         self.results: dict[int, tuple[Any, ...]] = {}
         self.pids: set[int] = set()  # 已拼入本区域的子进程；区域收尾成功后才计入 processes_used
         self.started = self.failed = self.done = False
+        # 流式交付（可选）：commit 把新拼接的记录追加到这里，由 stitch 交给调用方后清空。
+        self.fresh: list[dict[str, Any]] | None = None
 
     def bounds(self, piece: int) -> tuple[int, int, int]:
         start = self.starts[piece]
@@ -421,10 +447,20 @@ class _ProcessRegion:
 
     def commit(self, piece: tuple[Any, ...]) -> None:
         """Append the piece's events from the current cursor, which is on its path."""
-        addrs, records, gaps, end = piece
+        addrs, records, gaps, end = piece[:4]
         cursor = self.cursor
         first = bisect_left(addrs, self.base + cursor)
-        self.records.update(zip(islice(addrs, first, None), islice(records, first, None)))
+        if len(piece) > 4 and piece[4] == _decode_worker.ROWS:
+            # 子进程以行传输记录：只为实际拼入的部分重建紧凑 dict（重叠区的重复行不重建）；
+            # 同一批对象同时进入区域结果与流式交付，消费方的逐对象核对仍然成立。
+            built = _decode_worker.records_from_rows(islice(records, first, None))
+            self.records.update(zip(islice(addrs, first, None), built))
+            if self.fresh is not None:
+                self.fresh.extend(built)
+        else:
+            self.records.update(zip(islice(addrs, first, None), islice(records, first, None)))
+            if self.fresh is not None:
+                self.fresh.extend(islice(records, first, None))
         gap_bytes = 0
         for gap in islice(gaps, bisect_right(gaps, cursor, key=_GAP_END), None):
             # 二元组是不可解码缺口；三元组带原因（锚点重同步），游标只会位于其起点。
@@ -463,8 +499,14 @@ def _decode_with_processes(
     finished: Callable[[int, tuple[dict[int, dict[str, Any]], dict[str, Any], list[str]]], None],
     used: set[int],
     anchors: dict[int, Sequence[int]] | None = None,
+    on_records: Callable[[int, list[dict[str, Any]]], None] | None = None,
 ) -> None:
     """Decode regions with one shared, bounded set of worker processes.
+
+    ``on_records(index, records)`` (optional) receives, on the calling thread,
+    each newly stitched extension of a region's ``[0, cursor)`` prefix in
+    ascending address order. Those records are final for this path; a region
+    that later falls back is redone in-process with new record objects.
 
     ``anchors`` (optional) maps a region index to the region-relative
     resynchronization offsets that the serial sweep of that region uses.
@@ -496,6 +538,9 @@ def _decode_with_processes(
                              max(1, -(-regions[index]["file_backed_size"] // target)), step,
                              anchors.get(index, ()))
               for index in indices]
+    if on_records is not None:
+        for state in states:
+            state.fresh = []
     tasks = deque((position, piece) for position, state in enumerate(states)
                   for piece in range(len(state.starts)))
     owner: dict[int, tuple[int, list[tuple[int, int]]]] = {}
@@ -582,6 +627,9 @@ def _decode_with_processes(
             if state.cursor < end:
                 state.commit(piece)
                 state.pids.add(pid)
+            if state.fresh:
+                fresh, state.fresh = state.fresh, []
+                on_records(state.index, fresh)
             complete = state.next == len(state.starts)
             if complete and state.cursor != state.length:
                 fail(state)
@@ -673,6 +721,7 @@ def stream_decode_regions(
     processes: bool | None = None,
     diagnostics: dict[str, Any] | None = None,
     anchors: Iterable[int] | None = None,
+    on_records: Callable[[list[dict[str, Any]], int, list[dict[str, Any]]], None] | None = None,
 ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Decode every file-backed executable region into an address-keyed IR.
 
@@ -709,6 +758,17 @@ def stream_decode_regions(
     content, at a region start, or (for fixed 4-byte ARM/ARM64 instructions)
     off the sweep's 4-byte grid are ignored. The process path applies the
     same anchors, so results stay identical to serial decoding.
+
+    ``on_records(regions, index, records)`` (optional, default None) lets a
+    consumer start on completed instructions while decoding continues, in the
+    manner of an auto-analysis queue. It runs on the calling thread with the
+    coverage list (read only), a region index and records that the process
+    path has stitched for that region, in ascending address order. Delivery
+    is best effort: regions decoded in-process are not delivered, and a
+    delivered region may still fall back or lose records to an earlier
+    overlapping region, so the consumer must check what it received against
+    the returned instructions. An exception from the callback stops delivery
+    and adds a warning; decoding results never depend on it.
     """
     if type(workers) is not int or workers < 1:
         raise ValueError("workers must be a positive integer")
@@ -819,6 +879,18 @@ def stream_decode_regions(
 
         # 锚点只在存在时以关键字传入：无锚点的调用与原调用形式完全相同。
         extra: dict[str, Any] = {"anchors": region_anchors} if region_anchors else {}
+        if on_records is not None:
+            delivery = [on_records]
+
+            def deliver(index: int, records: list[dict[str, Any]]) -> None:
+                if not delivery:
+                    return
+                try:
+                    delivery[0](regions, index, records)
+                except Exception as exc:
+                    delivery.clear()
+                    _append_warning(warnings, f"Instruction stream callback failed: {type(exc).__name__}: {exc}")
+            extra["on_records"] = deliver
         _decode_with_processes(data, image, regions, list(range(len(regions))), processor, limit,
                                chunk_bytes, include_data, check_cancelled, report, finished, process_ids,
                                **extra)

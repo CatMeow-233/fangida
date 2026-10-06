@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from array import array
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -142,6 +143,8 @@ def _address(value: Any) -> int | None:
 _MAX_ADDRESS = 0xFFFFFFFFFFFFFFFF
 _new_object = object.__new__
 _set_field = object.__setattr__
+_NATIVE = ("", "native")
+_BYTECODE_KINDS = frozenset({"apk", "dex", "jar", "class"})
 
 
 def _trusted_location(address: int, source: str, space: str) -> Location:
@@ -224,6 +227,148 @@ def _record_context(record: Mapping[str, Any], table: str, kind: str
     return source, space
 
 
+class _RowAddresses:
+    """反汇编行的地址只读序列视图：第 i 项就是 rows[i]["addr"]，供 bisect 与切片使用。
+
+    只在全部行都是普通行、地址合法且非递减时使用：此时按 (地址, 行号, 字段) 排序的点
+    恰好就是行本身的顺序，不必再为每条指令保存地址、行号和 (行号, 字段) 元组。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._rows = rows
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def __getitem__(self, index: Any) -> Any:
+        if type(index) is slice:
+            return [record["addr"] for record in self._rows[index]]
+        return self._rows[index]["addr"]
+
+
+class _RowFields:
+    """与 _RowAddresses 对应的 (行号, "addr") 只读序列视图。"""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        self._rows = rows
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def __getitem__(self, index: Any) -> Any:
+        length = len(self._rows)
+        if type(index) is slice:
+            return [(row, "addr") for row in range(*index.indices(length))]
+        if index < 0:
+            index += length
+        if not 0 <= index < length:
+            raise IndexError("row index out of range")
+        return (index, "addr")
+
+
+def _plain_sorted_disassembly(records: Sequence[Any]) -> bool:
+    """全部行都是精确 dict 的普通行（上下文只取决于表名和结果类型）、addr 合法且非递减。
+
+    普通行的判定与 AddressIndex._index_disassembly 逐行处理时相同。
+    """
+    previous = 0
+    for record in records:
+        if (type(record) is not dict or "address_space" in record or "code_offset" in record
+                or "kind" in record or "source" in record):
+            return False
+        meta = record.get("arch_meta")
+        if meta is not None and (type(meta) is not dict or "address_space" in meta
+                                 or "arch" in meta or "container_member" in meta):
+            return False
+        address = record.get("addr")
+        if type(address) is not int or not previous <= address <= _MAX_ADDRESS:
+            return False
+        previous = address
+    return True
+
+
+def _sorted_pairs(keys: list[int], shift: int) -> tuple[array, array]:
+    """把 (地址 << shift | 行号) 排序后拆成地址数组和行号数组（与按 (地址, 行号) 排序相同）。"""
+    keys.sort()
+    mask = (1 << shift) - 1
+    return array("Q", (key >> shift for key in keys)), array("q", (key & mask for key in keys))
+
+
+class _XrefPoints:
+    """全部是普通原生行的 Xrefs 表：src、dst 端点按 (地址, 行号) 排序存放在定长数组中。
+
+    取代每条 xref 的两个点、两个 Location、一个 ReferenceTarget 和 _incoming/_outgoing 的
+    字典项；查询时用 bisect 取出行号，再现造（并按行号缓存）与原实现相等的对象。
+    """
+
+    __slots__ = ("rows", "src_addresses", "src_rows", "dst_addresses", "dst_rows")
+
+    def __init__(self, rows: Sequence[Any], src_addresses: array, src_rows: array,
+                 dst_addresses: array, dst_rows: array) -> None:
+        self.rows = rows
+        self.src_addresses = src_addresses
+        self.src_rows = src_rows
+        self.dst_addresses = dst_addresses
+        self.dst_rows = dst_rows
+
+    def __bool__(self) -> bool:
+        return bool(self.src_rows) or bool(self.dst_rows)
+
+    def at(self, address: int) -> list[tuple[int, str]]:
+        """该地址上的 (行号, 字段)，顺序与原 (地址, 行号, 字段) 排序相同（同一行 dst 在 src 前）。"""
+        found = [(row, "src") for row in self.src_rows[
+            bisect_left(self.src_addresses, address):bisect_right(self.src_addresses, address)]]
+        found.extend((row, "dst") for row in self.dst_rows[
+            bisect_left(self.dst_addresses, address):bisect_right(self.dst_addresses, address)])
+        found.sort()
+        return found
+
+    def has_incoming(self, address: int) -> bool:
+        """是否有 dst 为该地址、src 也合法的行（原实现中即 _incoming 里有该目标）。"""
+        rows = self.rows
+        for row in self.dst_rows[bisect_left(self.dst_addresses, address):
+                                 bisect_right(self.dst_addresses, address)]:
+            if _address(rows[row].get("src")) is not None:
+                return True
+        return False
+
+
+class _CfgBlocks:
+    """CFG 块表：(CFG 下标, 块下标, 块起点) 存在并行的定长数组里，查询时才构造 Location。
+
+    按下标读取时返回与原 (cfg_index, block_index, Location) 三元组相等的值。
+    """
+
+    __slots__ = ("_cfgs", "_blocks", "_addresses", "_contexts")
+
+    def __init__(self, count: int) -> None:
+        self._cfgs = array("q")
+        self._blocks = array("q")
+        self._addresses = array("Q")
+        self._contexts: list[tuple[str, str] | None] = [None] * count  # 每个 CFG 的 (source, space)
+
+    def __len__(self) -> int:
+        return len(self._cfgs)
+
+    def set_context(self, cfg_index: int, context: tuple[str, str]) -> None:
+        self._contexts[cfg_index] = context
+
+    def append(self, cfg_index: int, block_index: int, address: int) -> None:
+        self._cfgs.append(cfg_index)
+        self._blocks.append(block_index)
+        self._addresses.append(address)
+
+    def __getitem__(self, identifier: int) -> tuple[int, int, Location]:
+        cfg_index = self._cfgs[identifier]
+        source, space = self._contexts[cfg_index]
+        return (cfg_index, self._blocks[identifier],
+                _trusted_location(self._addresses[identifier], source, space))
+
+
 class _Intervals:
     """按最大结束位置剪枝，保留重叠函数而不随机选择其中一个。"""
 
@@ -247,6 +392,44 @@ class _Intervals:
                 found.add(index)
             cursor -= 1
         return tuple(sorted(found))
+
+
+class _PackedIntervals(_Intervals):
+    """与 _Intervals 查询结果相同，但起点、终点、标识和前缀最大终点存放在定长数组里。
+
+    每个区间 32 字节，而不是一个三元组、一个新建的终点 int 和三个 tuple 槽位。
+    """
+
+    def __init__(self, values: Sequence[tuple[int, int, int]]) -> None:
+        ordered = sorted(values)
+        self.starts = array("Q", (item[0] for item in ordered))
+        self.ends = array("Q", (item[1] for item in ordered))
+        self.identifiers = array("q", (item[2] for item in ordered))
+        maximum = 0
+        prefixes = array("Q")
+        for end in self.ends:
+            if end > maximum:
+                maximum = end
+            prefixes.append(maximum)
+        self.maximum_ends = prefixes
+
+    def at(self, address: int) -> tuple[int, ...]:
+        starts, ends, maximum_ends = self.starts, self.ends, self.maximum_ends
+        cursor = bisect_right(starts, address) - 1
+        found: set[int] = set()
+        while cursor >= 0 and maximum_ends[cursor] > address:
+            if starts[cursor] <= address < ends[cursor]:
+                found.add(self.identifiers[cursor])
+            cursor -= 1
+        return tuple(sorted(found))
+
+
+def _packed_intervals(values: Sequence[tuple[int, int, int]]) -> _Intervals:
+    """数组装得下（终点不超过 64 位）时用 _PackedIntervals，否则保持原 _Intervals。"""
+    try:
+        return _PackedIntervals(values)
+    except OverflowError:
+        return _Intervals(values)
 
 
 class AddressIndex:
@@ -287,7 +470,12 @@ class AddressIndex:
                 string_ranges[(location.source, location.address_space)].append(
                     (location.address, min(location.address + size, 1 << 64), identifier))
         self._strings = {key: _Intervals(values) for key, values in string_ranges.items()}
-        self._cfg_blocks: list[tuple[int, int, Location]] = []
+        # 全部是普通原生行的 Xrefs 表改用排序数组（见 _index_xrefs）；None 表示按原实现逐行索引。
+        self._xref_points: _XrefPoints | None = None
+        # 按行号缓存现造的 Xrefs ReferenceTarget：同一行在 outgoing、incoming 和字符串引用中
+        # 始终是同一个对象（与原实现共享同一对象的语义相同）。
+        self._xref_references: dict[int, ReferenceTarget] = {}
+        self._cfg_blocks = _CfgBlocks(len(cfgs))
         self._cfg_ranges: dict[tuple[str, str], _Intervals] = {}
         self._cfg_functions: dict[int, list[int]] = defaultdict(list)
         self._function_cfg: dict[int, tuple[int, ...]] = {}
@@ -295,6 +483,8 @@ class AddressIndex:
         for table, records in rows.items():
             if table == "Disassembly":
                 self._index_disassembly(records, grouped, kind)
+                continue
+            if table == "Xrefs" and self._index_xrefs(records, grouped):
                 continue
             for index, record in enumerate(records):
                 if not isinstance(record, Mapping):
@@ -348,6 +538,10 @@ class AddressIndex:
         for context, tables in grouped.items():
             self._points[context] = {}
             for table, values in tables.items():
+                if type(values) is not list:
+                    # 快速路径已给出最终结构（反汇编行视图或 xref 数组），保持表的插入顺序。
+                    self._points[context][table] = values
+                    continue
                 # 元素恰为 (地址, 行号, 字段) 三元组，自然排序与按这三项排序相同。
                 values.sort()
                 self._points[context][table] = (
@@ -368,6 +562,12 @@ class AddressIndex:
         只计算一次；其余行仍逐行调用 _record_context，结果与逐行计算相同。
         """
         plain_context = _record_context({}, "Disassembly", kind)
+        if type(records) in (list, tuple) and records and _plain_sorted_disassembly(records):
+            # 全部是普通行、地址合法且非递减（完整分析的 full_disassembly 即如此）：排序后的点
+            # 恰好按行号排列，地址序列与 (行号, 字段) 序列都可以由行本身给出，不再逐条保存。
+            # 首行就是普通行，分组在与逐行处理相同的时机建立，表的插入顺序不变。
+            grouped[plain_context]["Disassembly"] = (_RowAddresses(records), _RowFields(records))
+            return
         plain_points = None  # 首条普通行出现时才建分组，保持与逐行处理相同的分组插入顺序
         for index, record in enumerate(records):
             if type(record) is dict:
@@ -392,6 +592,78 @@ class AddressIndex:
                 if address is not None:
                     grouped[(source, space)]["Disassembly"].append((address, index, field))
                     break
+
+    def _index_xrefs(self, records: Sequence[Any], grouped: Any) -> bool:
+        """全部是普通原生行时，把 Xrefs 的端点建成排序数组并返回 True；否则不改任何状态并返回 False。
+
+        普通原生行：精确 dict，结果不是字节码容器，且没有 arch_meta、address_space、code_offset、
+        src_space、dst_space 键，kind 为 str（或缺省）且不是 dex/jvm/class。此时 _record_context
+        与 _row_locations 给出的两个端点一定是 ("", "native") 上下文，与逐行计算相同。
+        不满足条件（例如带端点空间的 Ghidra 合并行）时整张表按原实现逐行索引。
+        """
+        if self.kind in _BYTECODE_KINDS or type(records) not in (list, tuple):
+            return False
+        shift = max(1, len(records).bit_length())
+        src_addresses, src_rows = array("Q"), array("q")
+        src_sorted = True
+        previous = 0
+        destinations: list[int] = []
+        add_destination = destinations.append
+        for row, record in enumerate(records):
+            if type(record) is not dict:
+                if isinstance(record, Mapping):
+                    return False
+                continue  # 与原实现相同：非映射行没有端点
+            if ("arch_meta" in record or "address_space" in record or "code_offset" in record
+                    or "src_space" in record or "dst_space" in record):
+                return False
+            kind = record.get("kind")
+            if kind is not None and (type(kind) is not str or kind in {"dex", "jvm", "class"}):
+                return False
+            address = record.get("src")
+            if type(address) is int and 0 <= address <= _MAX_ADDRESS:
+                if address < previous:
+                    src_sorted = False
+                previous = address
+                src_addresses.append(address)
+                src_rows.append(row)
+            address = record.get("dst")
+            if type(address) is int and 0 <= address <= _MAX_ADDRESS:
+                add_destination(address << shift | row)
+        if not src_sorted:
+            # 引用通常已按 src 排序；否则按 (地址, 行号) 重新排序。
+            src_addresses, src_rows = _sorted_pairs(
+                [address << shift | row for address, row in zip(src_addresses, src_rows)], shift)
+        dst_addresses, dst_rows = _sorted_pairs(destinations, shift)
+        del destinations
+        points = _XrefPoints(records, src_addresses, src_rows, dst_addresses, dst_rows)
+        self._xref_points = points
+        if points:
+            # 与逐行处理相同：表内出现第一个合法端点时才建立分组（Xrefs 只有原生上下文）。
+            grouped[_NATIVE]["Xrefs"] = points
+        return True
+
+    def _xref_reference(self, row: int) -> ReferenceTarget | None:
+        """第 row 行的 ReferenceTarget（两个端点都合法时）；同一行始终返回同一个对象。"""
+        reference = self._xref_references.get(row)
+        if reference is None:
+            record = self._xref_points.rows[row]
+            source, target = _address(record.get("src")), _address(record.get("dst"))
+            if source is None or target is None:
+                return None
+            reference = self._xref_references.setdefault(row, ReferenceTarget(
+                "Xrefs", row, _trusted_location(source, "", "native"),
+                _trusted_location(target, "", "native"), str(record.get("kind", ""))))
+        return reference
+
+    def _xref_range(self, addresses: array, rows: array, address: int) -> list[ReferenceTarget]:
+        """该地址上的 Xrefs 引用（按行号顺序），只含两个端点都合法的行，与原 _outgoing/_incoming 相同。"""
+        found = []
+        for row in rows[bisect_left(addresses, address):bisect_right(addresses, address)]:
+            reference = self._xref_reference(row)
+            if reference is not None:
+                found.append(reference)
+        return found
 
     def _string_row_locations(self, record: Mapping[str, Any]
                               ) -> tuple[tuple[str, Location], ...]:
@@ -546,12 +818,17 @@ class AddressIndex:
 
     def _index_cfgs(self) -> None:
         block_cache = self._block_cache
+        blocks_table = self._cfg_blocks
+        contexts: dict[tuple[str, str], tuple[str, str]] = {}
         by_entry: dict[Location, list[int]] = defaultdict(list)
         ranges: dict[tuple[str, str], list[tuple[int, int, int]]] = defaultdict(list)
         for cfg_index, cfg in enumerate(self._cfgs):
             if not isinstance(cfg, Mapping):
                 continue
-            source, space = _record_context(cfg, "Functions", self.kind)
+            context = _record_context(cfg, "Functions", self.kind)
+            context = contexts.setdefault(context, context)  # 各 CFG 共用相同的上下文元组
+            blocks_table.set_context(cfg_index, context)
+            source, space = context
             start = _address(cfg.get("start"))
             if start is not None:
                 by_entry[Location(start, source, space)].append(cfg_index)
@@ -570,9 +847,8 @@ class AddressIndex:
                     address = next((_address(record.get("addr")) for record in instructions
                                     if isinstance(record, Mapping) and _address(record.get("addr")) is not None), None)
                 if address is not None:
-                    location = _trusted_location(address, source, space)
-                    identifier = len(self._cfg_blocks)
-                    self._cfg_blocks.append((cfg_index, block_index, location))
+                    identifier = len(blocks_table)
+                    blocks_table.append(cfg_index, block_index, address)
                     cached = block_cache.get(id(block))
                     if cached is None:
                         cached = block_cache[id(block)] = _block_spans(block)
@@ -588,7 +864,7 @@ class AddressIndex:
                 self._function_cfg[index] = tuple(matches)
                 for cfg_index in matches:
                     self._cfg_functions[cfg_index].append(index)
-        self._cfg_ranges = {key: _Intervals(values) for key, values in ranges.items()}
+        self._cfg_ranges = {key: _packed_intervals(values) for key, values in ranges.items()}
 
     def _target(self, table: str, index: int, field: str = "", *,
                 location: Location | None = None) -> NavigationTarget:
@@ -604,9 +880,14 @@ class AddressIndex:
         context = (location.source, location.address_space)
         tables = self._points.get(context, {})
         targets = []
-        for name, (addresses, records) in tables.items():
+        for name, points in tables.items():
             if table is not None and name != table:
                 continue
+            if type(points) is _XrefPoints:
+                for index, field in points.at(location.address):
+                    targets.append(self._target(name, index, field, location=location))
+                continue
+            addresses, records = points
             begin, end = bisect_left(addresses, location.address), bisect_right(addresses, location.address)
             for index, field in records[begin:end]:
                 targets.append(self._target(name, index, field, location=location))
@@ -711,6 +992,10 @@ class AddressIndex:
 
     def incoming(self, location: Location) -> tuple[ReferenceTarget, ...]:
         references = list(self._incoming.get(location, ()))
+        points = self._xref_points
+        if points is not None and location.source == "" and location.address_space == "native":
+            # 原实现先索引 Xrefs、后追加 API Calls：同一目标上 Xrefs 引用排在前面。
+            references[:0] = self._xref_range(points.dst_addresses, points.dst_rows, location.address)
         seen = {(item.table, item.row_index) for item in references}
         intervals = self._strings.get((location.source, location.address_space))
         for identifier in intervals.at(location.address) if intervals else ():
@@ -722,10 +1007,58 @@ class AddressIndex:
         return tuple(references)
 
     def _index_string_references(self) -> None:
+        points = self._xref_points
+        if points is not None:
+            self._index_compact_string_references(points)
+            return
         for destination, references in self._incoming.items():
             intervals = self._strings.get((destination.source, destination.address_space))
             for identifier in intervals.at(destination.address) if intervals else ():
                 self._string_references[identifier].extend(references)
 
+    def _index_compact_string_references(self, points: _XrefPoints) -> None:
+        """与原实现按 _incoming 插入顺序扩展的结果相同。
+
+        原 _incoming 的目标顺序：先是各 Xrefs 目标按首次出现的行号（只计两个端点都合法的行），
+        每个目标先放它的 Xrefs 引用、再放同一位置的 API Calls 引用；之后才是只出现在 API Calls
+        中的目标。这里只为落在字符串区间内的目标现造（并缓存）引用对象。
+        """
+        intervals = self._strings.get(_NATIVE)
+        addresses, rows = points.dst_addresses, points.dst_rows
+        if intervals is not None and addresses:
+            hits = []
+            cursor, count = 0, len(addresses)
+            while cursor < count:
+                address = addresses[cursor]
+                following = bisect_right(addresses, address, cursor)
+                identifiers = intervals.at(address)
+                if identifiers:
+                    references = []
+                    for row in rows[cursor:following]:
+                        reference = self._xref_reference(row)
+                        if reference is not None:
+                            references.append(reference)
+                    if references:
+                        hits.append((references[0].row_index, address, identifiers, references))
+                cursor = following
+            hits.sort(key=lambda item: item[0])  # 各目标首行互不相同
+            for _, address, identifiers, references in hits:
+                references.extend(self._incoming.get(_trusted_location(address, "", "native"), ()))
+                for identifier in identifiers:
+                    self._string_references[identifier].extend(references)
+        for destination, references in self._incoming.items():
+            # 此时 _incoming 只含 API Calls 引用；原生目标若也是 Xrefs 目标，已随上面一起处理。
+            if (destination.source == "" and destination.address_space == "native"
+                    and points.has_incoming(destination.address)):
+                continue
+            context = self._strings.get((destination.source, destination.address_space))
+            for identifier in context.at(destination.address) if context else ():
+                self._string_references[identifier].extend(references)
+
     def outgoing(self, location: Location) -> tuple[ReferenceTarget, ...]:
+        points = self._xref_points
+        if points is not None and location.source == "" and location.address_space == "native":
+            references = self._xref_range(points.src_addresses, points.src_rows, location.address)
+            references.extend(self._outgoing.get(location, ()))
+            return tuple(references)
         return tuple(self._outgoing.get(location, ()))

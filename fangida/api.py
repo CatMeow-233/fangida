@@ -214,13 +214,19 @@ class AnalysisView:
 
     def export_json(self, destination: str | Path) -> Path:
         path = Path(destination).expanduser().resolve()
-        payload = _indented_json(self._snapshot) + "\n"
-        path.write_text(payload, encoding="utf-8")
+        # 与 path.write_text(_indented_json(快照) + "\n", encoding="utf-8") 写出逐字节相同的文件，
+        # 但流式写出、不生成整串（大文件的整串连同 UTF-8 编码副本是快照的数倍）；先完整校验一遍
+        # 再原地写入，编码失败时仍不创建、不截断目标文件。
+        _json_stream.write_text(path, self._snapshot, end="\n", encoding="utf-8",
+                                indent=2, ensure_ascii=False)
         return path
 
 
 def _indented_json(value: Any) -> str:
     """等价于 json.dumps(value, indent=2, ensure_ascii=False)，先完整生成字符串再由调用方写入。
+
+    AnalysisView.export_json 已改为经 _json_stream.write_text 流式写出同一段文本；本函数保留给
+    既有调用方。
 
     3.11/3.12 的 C 编码器不支持 indent，json.dumps 会退回逐 token 的纯 Python 生成器；
     此时改用分块编码器生成同一段文本。3.13+ 保持 json.dumps 不变。

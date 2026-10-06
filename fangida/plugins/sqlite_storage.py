@@ -6,10 +6,14 @@ provide paging without materialising an entire analysis snapshot.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import fields
+from itertools import islice
 import json
+import math
+from operator import itemgetter, le
 import os
 from pathlib import Path
 import sqlite3
@@ -36,11 +40,108 @@ _MANIFEST = "__manifest__"
 # typing.Mapping 的 isinstance 要经过 typing/abc 两层 __instancecheck__，非常慢，
 # 因此先用精确类型快速分支，其余对象仍走原来的 isinstance 判断链，语义不变。
 _SCALARS = frozenset({str, int, float, bool, type(None)})
+# 读回时在指令记录之间共享的子字典（与解码工作进程 share_records 的字典部分相同）。
+_SHARED_PARTS = ("branch_info", "arch_meta")
+
+
+_BYTECODE_KINDS = frozenset({"apk", "dex", "jar", "class"})
+_ADDR = itemgetter("addr")
+
+
+def _full_listing_records(payload: Mapping[str, Any], metadata: Mapping[str, Any]
+                          ) -> list[Any] | None:
+    """原生完整分析的快速路径：合并结果就是 full_disassembly 本身时返回它的副本，否则返回 None。
+
+    完整分析里函数、块中的指令就是 full_disassembly 中同地址的同一对象，按 (source, 地址)
+    合并、排序后的结果与 full_disassembly 的对象和顺序完全相同。这里只核对这一点，不为每条
+    指令建 (source, 地址) 元组键和排序键（il2cpp 规模约 5 GiB 的瞬时峰值）。核对按块二分定位
+    一次，之后用游标顺序比对身份。任何条件不满足都返回 None，由调用方走通用合并，结果不变。
+    """
+    if (payload.get("kind") in _BYTECODE_KINDS or payload.get("instructions") is not None
+            or metadata.get("instructions") is not None):
+        return None
+    full = metadata.get("full_disassembly")
+    if type(full) is not list:
+        return None
+    previous = -1
+    for record in full:
+        # 原实现以 (str(source), 地址) 为键：普通 dict、不带 source、addr 为严格递增的非负整数时，
+        # 每条记录各占一个键，合并后的顺序就是列表顺序。
+        if type(record) is not dict:
+            return None
+        address = record.get("addr")
+        if type(address) is not int or address <= previous or "source" in record:
+            return None
+        previous = address
+    count = len(full)
+
+    def located(value: Any) -> int | None:
+        """value 会被原实现收集时，返回它在 full 中同地址的位置；不收集时返回 -1；无法判定时返回 None。"""
+        if type(value) is not dict:
+            # 非 dict 的 Mapping 少见，保守回退；其它对象原实现直接跳过。
+            return None if isinstance(value, Mapping) else -1
+        address = value.get("addr", value.get("address", value.get("offset")))
+        if type(address) is not int or address < 0:
+            return -1
+        if "source" in value:
+            return None
+        position = bisect_left(full, address, key=_ADDR)
+        if position >= count or full[position]["addr"] != address:
+            return None
+        return position
+
+    # metadata.disassembly 先于 full_disassembly 收集，同键会被 full 中的记录覆盖：只要求地址都在 full 中。
+    listing = metadata.get("disassembly")
+    if isinstance(listing, list):
+        cursor = 0
+        for value in listing:
+            if cursor < count and value is full[cursor]:
+                cursor += 1
+                continue
+            position = located(value)
+            if position is None:
+                return None
+            if position >= 0:
+                cursor = position + 1
+
+    def shared(values: Any) -> bool:
+        """函数、块中的指令后于 full 收集并覆盖同键：必须是 full 中同地址的同一对象。"""
+        if not isinstance(values, list):
+            return True
+        cursor = 0
+        for value in values:
+            if cursor < count and value is full[cursor]:
+                cursor += 1
+                continue
+            position = located(value)
+            if position is None or (position >= 0 and full[position] is not value):
+                return False
+            if position >= 0:
+                cursor = position + 1
+        return True
+
+    for function in payload.get("functions", []):
+        if type(function) is not dict and not isinstance(function, Mapping):
+            continue
+        if not shared(function.get("instructions")) or not shared(function.get("disassembly")):
+            return None
+        blocks = function.get("blocks", [])
+        if isinstance(blocks, list):
+            for block in blocks:
+                if (type(block) is dict or isinstance(block, Mapping)) and not shared(
+                        block.get("instructions")):
+                    return None
+    return list(full)
 
 
 def _disassembly_records(payload: Mapping[str, Any], metadata: Mapping[str, Any]) -> list[Any]:
     """Merge existing listings only; storage never decodes missing instructions."""
-    indexed: dict[tuple[str, int], Mapping[str, Any]] = {}
+    fast = _full_listing_records(payload, metadata)
+    if fast is not None:
+        return fast
+    # 按 source 分组、以整数地址为键，不为每条指令建 (source, 地址) 元组键；
+    # 后写覆盖与按 (地址, source) 排序的输出与原来的元组键实现相同。
+    grouped: dict[str, dict[int, Mapping[str, Any]]] = {}
 
     def collect(values: Any, source: str = "") -> None:
         if not isinstance(values, list):
@@ -53,12 +154,16 @@ def _disassembly_records(payload: Mapping[str, Any], metadata: Mapping[str, Any]
                 continue
             if source and "source" not in value:
                 value = {**value, "source": source}
-            indexed[(str(value.get("source", "")), address)] = value
+            key = str(value.get("source", ""))
+            bucket = grouped.get(key)
+            if bucket is None:
+                bucket = grouped[key] = {}
+            bucket[address] = value
 
     for values in (payload.get("instructions"), metadata.get("disassembly"),
                    metadata.get("full_disassembly"), metadata.get("instructions")):
         collect(values)
-    bytecode = payload.get("kind") in {"apk", "dex", "jar", "class"}
+    bytecode = payload.get("kind") in _BYTECODE_KINDS
     for function in payload.get("functions", []):
         if type(function) is not dict and not isinstance(function, Mapping):
             continue
@@ -70,7 +175,10 @@ def _disassembly_records(payload: Mapping[str, Any], metadata: Mapping[str, Any]
             for block in blocks:
                 if type(block) is dict or isinstance(block, Mapping):
                     collect(block.get("instructions"), source)
-    return [indexed[key] for key in sorted(indexed, key=lambda key: (key[1], key[0]))]
+    if len(grouped) <= 1:
+        return [bucket[address] for bucket in grouped.values() for address in sorted(bucket)]
+    return [grouped[source][address] for address, source in sorted(
+        (address, source) for source, bucket in grouped.items() for address in bucket)]
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -144,12 +252,101 @@ def _decode_chunk(row: sqlite3.Row, expected_count: int) -> list[Any]:
     return values
 
 
+def _same_json(left: Any, right: Any) -> bool:
+    """严格比较两个 JSON 解码值：类型、键顺序与值都相同。
+
+    == 会把 1、1.0 与 True，0.0 与 -0.0 视为相等，用它决定共享会改变值的类型或序列化结果。
+    """
+    if left is right:
+        return True
+    kind = type(left)
+    if kind is not type(right):
+        return False
+    if kind is dict:
+        if len(left) != len(right):
+            return False
+        for (left_key, left_item), (right_key, right_item) in zip(left.items(), right.items()):
+            if left_key != right_key or not _same_json(left_item, right_item):
+                return False
+        return True
+    if kind is list:
+        return len(left) == len(right) and all(map(_same_json, left, right))
+    if kind is float:
+        return left == right and math.copysign(1.0, left) == math.copysign(1.0, right)
+    return left == right
+
+
+def _same_reference(candidate: dict[str, Any], entry: dict[str, Any]) -> bool:
+    """_same_json 的快速版本：平坦的 xref 字典只用 C 层比较，含嵌套容器或零值时再逐项严格比较。"""
+    if candidate != entry or list(candidate) != list(entry):
+        return False
+    types = list(map(type, candidate.values()))
+    if types != list(map(type, entry.values())):
+        return False
+    if dict in types or list in types or 0.0 in candidate.values():
+        return _same_json(candidate, entry)
+    return True
+
+
+def _reshare_references(payload: dict[str, Any]) -> None:
+    """重新打开后，让函数 xrefs_in/xrefs_out 里的元素重新指向值相同的顶层 xrefs 字典。
+
+    新分析里这些列表与顶层 xrefs 共享同一批字典；入库时各处分别内联编码，读回后每次出现
+    都是独立的新字典（il2cpp 规模约多 3.5 GiB）。这里只恢复同值字典的别名：按 src 二分找到
+    候选，类型、键顺序与值都相同才替换，找不到就保留原字典。值不变；xref 字典创建后不再被
+    原地修改（标注叠加只改带整数 address/start/addr 的字典，xref 没有这些键）。
+    """
+    references = payload.get("xrefs")
+    functions = payload.get("functions")
+    if type(references) is not list or not references or type(functions) is not list:
+        return
+    source_of = itemgetter("src")
+    candidates = references
+    if not all(type(reference) is dict and type(reference.get("src")) is int
+               for reference in references):
+        candidates = [reference for reference in references
+                      if type(reference) is dict and type(reference.get("src")) is int]
+    sources = list(map(source_of, candidates))
+    if not all(map(le, sources, islice(sources, 1, None))):
+        # 完整分析的 xrefs 已按 src 升序；其它来源先按 src 稳定排序（只排列指针，不复制字典）。
+        candidates = sorted(candidates, key=source_of)
+        sources = list(map(source_of, candidates))
+    count = len(candidates)
+    if not count:
+        return
+    for function in functions:
+        if type(function) is not dict:
+            continue
+        for key in ("xrefs_in", "xrefs_out"):
+            entries = function.get(key)
+            if type(entries) is not list:
+                continue
+            for position, entry in enumerate(entries):
+                if type(entry) is not dict:
+                    continue
+                source = entry.get("src")
+                if type(source) is not int:
+                    continue
+                index = bisect_left(sources, source)
+                while index < count and sources[index] == source:
+                    candidate = candidates[index]
+                    if candidate is entry:
+                        break
+                    if _same_reference(candidate, entry):
+                        entries[position] = candidate
+                        break
+                    index += 1
+
+
 class _Encoder:
     """Borrow input records; copy only the current bounded serialization chunk."""
 
     def __init__(self, annotations: dict[str, dict[int, str]] | None = None) -> None:
         self.instructions: list[Mapping[str, Any]] = []
-        self.by_address: dict[int, list[tuple[int, Mapping[str, Any]]]] = {}
+        # 地址 -> 指令池下标。绝大多数地址只有一条记录，只存一个 int；同地址出现不同记录时
+        # 才升级为下标列表。记录本身从 self.instructions 取，不再为每条指令保存
+        # [(index, record)] 列表和二元组（il2cpp 规模保存期间约省 4 GiB 常驻内存）。
+        self.by_address: dict[int, int | list[int]] = {}
         self.current_instruction: int | None = None
         self.dependencies: dict[int, set[int]] = {}
         self.annotations = annotations
@@ -169,13 +366,22 @@ class _Encoder:
             if (type(value.get("addr")) is int and type(value.get("size")) is int
                     and isinstance(value.get("mnemonic"), str)):
                 address = value["addr"]
-                candidates = self.by_address.setdefault(address, [])
-                for index, previous in candidates:
-                    if previous is value or previous == value:
-                        return self.reference(index)
-                index = len(self.instructions)
-                self.instructions.append(value)
-                candidates.append((index, value))
+                instructions = self.instructions
+                found = self.by_address.get(address)
+                if found is not None:
+                    # 与原来逐个比较 [(index, record)] 的次序和判定相同：先比身份，再比值。
+                    for index in ((found,) if type(found) is int else found):
+                        previous = instructions[index]
+                        if previous is value or previous == value:
+                            return self.reference(index)
+                index = len(instructions)
+                instructions.append(value)
+                if found is None:
+                    self.by_address[address] = index
+                elif type(found) is int:
+                    self.by_address[address] = [found, index]
+                else:
+                    found.append(index)
                 return self.reference(index)
             return self.pack_mapping(value)
         if kind is list or kind is tuple or isinstance(value, (list, tuple)):
@@ -245,6 +451,61 @@ class _Reader:
         self.chunks: OrderedDict[tuple[str, int], list[Any]] = OrderedDict()
         self.instructions: dict[int, dict[str, Any]] = {}
         self.resolving: set[int] = set()
+        # JSON 解码为每次出现都新建字符串和字典，分析结果中经 share_records 共享的助记符、
+        # 操作数、寄存器名与 arch_meta/branch_info 读回后各占一份（每条指令约多 650 字节）。
+        # 两个规范表只在本次读取内有效，reader 释放后随之释放。
+        self._strings: dict[str, str] = {}
+        self._shared: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+    @staticmethod
+    def _part_marker(key: str, value: Any) -> tuple[Any, ...] | None:
+        """可共享子字典的规范键（未检查可哈希性）；不参与共享时返回 None。
+
+        只共享平坦字典，并排除带整数 address/start/addr 的字典：存储层 _overlay 与界面的标注
+        叠加只原地修改这类字典。键顺序与值的类型都计入规范键，1、1.0 与 True 不会混用；
+        含浮点数的不共享（0.0 与 -0.0 相等但序列化不同）。引用与转义字面量按原路径展开。
+        """
+        if (type(value) is not dict or (len(value) == 1 and (_REF in value or _LITERAL in value))
+                or type(value.get("address", value.get("start", value.get("addr")))) is int):
+            return None
+        types = tuple(map(type, value.values()))
+        if float in types:
+            return None
+        return (key, tuple(value.items()), types)
+
+    def _expand_instruction(self, record: Any) -> Any:
+        """展开一条指令池记录；值相同的 branch_info/arch_meta 复用同一个已展开的字典。
+
+        规则与解码工作进程的 share_records 相同，只共享内容全部可哈希（不含嵌套字典、列表）
+        的平坦字典。在原始 JSON 记录上判定，重复的子字典不再逐个展开。值、类型和键顺序都不变。
+        """
+        if (type(record) is not dict or type(record.get("addr")) is not int
+                or type(record.get("size")) is not int or type(record.get("mnemonic")) is not str):
+            return self.expand(record)
+        shared = self._shared
+        reused: dict[str, dict[str, Any]] = {}
+        pending: list[tuple[str, tuple[Any, ...]]] = []
+        for key in _SHARED_PARTS:
+            marker = self._part_marker(key, record.get(key))
+            if marker is None:
+                continue
+            try:
+                canonical = shared.get(marker)
+            except TypeError:
+                continue  # 含列表、字典等不可哈希的值（如 memory_references）：保留独立对象
+            if canonical is None:
+                pending.append((key, marker))
+            else:
+                reused[key] = canonical
+        expand, strings = self.expand, self._strings.setdefault
+        instruction = {key: (strings(item, item) if type(item) is str
+                             else item if type(item) in _SCALARS
+                             else reused[key] if key in reused else expand(item))
+                       for key, item in record.items()}
+        for key, marker in pending:
+            # 展开期间嵌套的指令可能已登记同一规范键：沿用先登记的对象。
+            instruction[key] = shared.setdefault(marker, instruction[key])
+        return instruction
 
     def descriptor(self, collection: str) -> sqlite3.Row:
         if collection not in self.collections:
@@ -325,7 +586,7 @@ class _Reader:
                     self.resolving.add(index)
                     try:
                         record = self._pool_record(index)
-                        instruction = self.expand(record)
+                        instruction = self._expand_instruction(record)
                         if not isinstance(instruction, dict):
                             raise StorageSchemaError("Invalid instruction pool record")
                         self.instructions[index] = instruction
@@ -337,12 +598,18 @@ class _Reader:
                 if not isinstance(literal, dict):
                     raise StorageSchemaError("Invalid escaped literal")
                 return {key: self.expand(item) for key, item in literal.items()}
-            expand = self.expand
-            return {key: (item if type(item) in _SCALARS else expand(item))
+            # 字符串值换成本次读取内的规范实例（不可变，共享安全）；其余标量原样保留。
+            expand, strings = self.expand, self._strings.setdefault
+            return {key: (strings(item, item) if type(item) is str
+                          else item if type(item) in _SCALARS else expand(item))
                     for key, item in value.items()}
         if isinstance(value, list):
-            expand = self.expand
-            return [item if type(item) in _SCALARS else expand(item) for item in value]
+            expand, strings = self.expand, self._strings.setdefault
+            items = [strings(item, item) if type(item) is str
+                     else item if type(item) in _SCALARS else expand(item) for item in value]
+            # 推导式按追加增长并预留容量（1~4 项都分配 4 个槽位）；切片得到容量恰好的新列表。
+            # 每条记录仍各有自己的列表，不在记录之间共享可变列表。
+            return items[:] if items else items
         return value
 
 
@@ -706,6 +973,8 @@ class SQLiteAnalysisDatabase:
             annotations = self._annotations(connection, snapshot)
             if annotations["renames"] or annotations["comments"]:
                 self._overlay(payload, annotations)
+            # 在叠加标注之后进行，候选与元素都已是最终值。
+            _reshare_references(payload)
             metadata = payload.setdefault("metadata", {})
             metadata["user_annotations"] = {"sha256": annotations["sha256"],
                 "renames": {str(key): value for key, value in annotations["renames"].items()},

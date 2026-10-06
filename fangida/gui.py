@@ -67,6 +67,7 @@ from .gui_modules.operations import (
     _annotate_database_view,
     _annotate_owned_view,
     _annotation_index,
+    _annotation_targets,
     _apply_annotation,
     _database_view,
     _hex_source,

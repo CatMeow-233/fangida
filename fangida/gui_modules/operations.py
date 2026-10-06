@@ -151,14 +151,84 @@ def _annotation_index(snapshot: dict[str, Any]) -> dict[int, list[dict[str, Any]
     return index
 
 
-def _apply_annotation(snapshot: dict[str, Any], index: dict[int, list[dict[str, Any]]],
+def _annotation_targets(snapshot: dict[str, Any]) -> dict[int, dict[str, Any] | list[dict[str, Any]]]:
+    """与 _annotation_index 相同的分组与组内顺序，但更省内存，供 GUI 标注缓存使用。
+
+    值为单个 dict；只有同一地址有多条记录时才是 list（顺序与 _annotation_index 逐对象相同）。
+    遍历顺序与 _annotation_index 完全相同，只是不再为每个对象记录 id：
+    - 带地址的字典按“是否已在该地址的分组里”（对象身份）去重，二者等价——它被首次访问时
+      正好加入分组；
+    - 无地址、但含 dict/list 子项的容器才记入 seen；
+    - 不含容器子项的叶子容器重复访问既不建索引也不压栈，没有任何效果，因此不必记录。
+    任何环都只经过前两类容器，所以遍历一定终止。
+    """
+    index: dict[int, Any] = {}
+    large: dict[int, set[int]] = {}  # 记录多的地址改用 id 集合去重，避免逐个比较退化成平方
+    seen: set[int] = set()
+    stack: list[Any] = [snapshot]
+    pop, push = stack.pop, stack.append
+    while stack:
+        value = pop()
+        if isinstance(value, dict):
+            address = value.get("address", value.get("start", value.get("addr")))
+            if type(address) is int:
+                slot = index.get(address)
+                if slot is None:
+                    index[address] = value
+                elif type(slot) is list:
+                    ids = large.get(address)
+                    if ids is not None:
+                        if id(value) in ids:
+                            continue
+                        ids.add(id(value))
+                    else:
+                        if any(item is value for item in slot):
+                            continue
+                        if len(slot) >= 8:
+                            large[address] = {id(item) for item in slot}
+                            large[address].add(id(value))
+                    slot.append(value)
+                elif slot is value:
+                    continue
+                else:
+                    index[address] = [slot, value]
+                for item in value.values():
+                    if isinstance(item, (dict, list)):
+                        push(item)
+                continue
+            identity = id(value)
+            if identity in seen:
+                continue
+            depth = len(stack)
+            for item in value.values():
+                if isinstance(item, (dict, list)):
+                    push(item)
+        else:
+            identity = id(value)
+            if identity in seen:
+                continue
+            depth = len(stack)
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    push(item)
+        if len(stack) != depth:
+            seen.add(identity)
+    return index
+
+
+def _apply_annotation(snapshot: dict[str, Any], index: dict[int, Any],
                       operation: str, address: int, value: str) -> None:
-    """在内存快照上施加一条标注，结果与从数据库重新读出（叠加全部标注）相同。"""
+    """在内存快照上施加一条标注，结果与从数据库重新读出（叠加全部标注）相同。
+
+    index 可以是 _annotation_index（值总是 list）或 _annotation_targets（单条记录时值为 dict）的结果。
+    """
     annotations = snapshot.setdefault("metadata", {}).setdefault("user_annotations", {})
     renames = annotations.setdefault("renames", {})
     comments = annotations.setdefault("comments", {})
     key = str(address)
     targets = index.get(address, ())
+    if isinstance(targets, dict):
+        targets = (targets,)  # _annotation_targets 中只有一条记录的地址直接存记录本身
     if operation == "rename_symbol":
         for record in targets:
             if "name" in record:
@@ -214,7 +284,10 @@ def _annotate_owned_view(view: AnalysisView, operation: str, address: int, value
     if cache is not None and cache.get("snapshot") is snapshot:
         index = cache["index"]
     else:
-        index = _gui()._annotation_index(snapshot)
+        if cache is not None:
+            # 先丢弃旧快照的索引再建新索引，两份索引不同时存活（大文件上各有数 GB）。
+            cache.clear()
+        index = _gui()._annotation_targets(snapshot)
         if cache is not None:
             cache.update(snapshot=snapshot, index=index)
     _gui()._apply_annotation(snapshot, index, operation, address, value)

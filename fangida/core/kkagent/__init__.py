@@ -18,6 +18,19 @@ from .strings import MAX_STRING_BYTES, scan_native_strings
 
 MAX_SCAN_BYTES = 32 * 1024 * 1024
 
+
+def _preview_functions(functions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """预览函数列表：就地标注新建的 dict，避免 GUI 持有预览期间每个种子各多一份外层字典。"""
+    scoped: list[dict[str, Any]] = []
+    for item in functions:
+        if type(item) is dict:
+            item["analysis_scope"] = "preview_declared_root"
+            scoped.append(item)
+        else:
+            scoped.append({**item, "analysis_scope": "preview_declared_root"})
+    return scoped
+
+
 def _preview_result(result: AnalysisResult, instructions: list[dict[str, Any]],
                     coverage: list[dict[str, Any]],
                     functions: list[dict[str, Any]] | None = None) -> AnalysisResult:
@@ -25,6 +38,9 @@ def _preview_result(result: AnalysisResult, instructions: list[dict[str, Any]],
 
     指令列表与最终结果共享（解码完成后只读）；其余列表与字典是浅拷贝，
     之后的函数恢复、CFG、xref 与伪 C 只修改最终结果，不影响已交出的预览。
+    预览函数（functions）是 analyze_full 专为预览新建、交出后不再使用的字典，
+    直接就地标注 analysis_scope 后交给预览，不再逐项复制一份（键序与值同
+    {**item, "analysis_scope": ...}）；非 dict 类型的项仍复制成 dict。
     """
     metadata = {**result.metadata, "full_disassembly": instructions,
                 "full_analysis": {"enabled": True, "preview": True,
@@ -36,7 +52,7 @@ def _preview_result(result: AnalysisResult, instructions: list[dict[str, Any]],
              "full_instructions": len(instructions)}
     return AnalysisResult(result.path, result.kind, result.analyzer, "partial",
                           metadata=metadata,
-                          functions=([{**item, "analysis_scope": "preview_declared_root"} for item in functions]
+                          functions=(_preview_functions(functions)
                                      if functions is not None else [dict(item) for item in result.functions]),
                           strings=list(result.strings), imports=list(result.imports),
                           exports=list(result.exports), xrefs=list(result.xrefs), stats=stats,

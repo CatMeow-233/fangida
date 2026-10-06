@@ -728,6 +728,27 @@ def _may_return(entry: int, blocks: dict[int, _Block] | None, current: Mapping[i
     return False
 
 
+def _index_add(index: dict[int, int | list[int]], key: int, start: int) -> None:
+    """紧凑反向索引登记：单个起点直接存值，第二个起点出现时才换成列表。
+
+    起点是 int（_scan/_summary 只接受 int 入口），不会与列表混淆。"""
+    entry = index.get(key)
+    if entry is None:
+        index[key] = start
+    elif type(entry) is list:
+        if entry[-1] is not start:
+            entry.append(start)
+    elif entry is not start:
+        index[key] = [entry, start]
+
+
+def _index_get(index: dict[int, int | list[int]], key: int) -> tuple[int, ...] | list[int]:
+    entry = index.get(key)
+    if entry is None:
+        return ()
+    return entry if type(entry) is list else (entry,)
+
+
 def local_noreturn(functions: Iterable[dict[str, Any]], targets: Mapping[int, Any],
                    sites: Mapping[int, Any] | None = None, *,
                    max_rounds: int = MAX_FIXED_POINT_ROUNDS,
@@ -748,8 +769,12 @@ def local_noreturn(functions: Iterable[dict[str, Any]], targets: Mapping[int, An
     summaries: dict[int, tuple[int, dict[int, _Block] | None]] = {}
     sources: dict[int, dict[str, Any]] = {}
     first_round: dict[int, bool] = {}   # 精简扫描给出的首轮结论（True 表示可能返回）
-    callers: dict[int, set[int]] = {}
-    call_sites: dict[int, set[int]] = {}
+    # 反向索引：被依赖/被调用的目标 -> 依赖它的函数起点。约三分之二的目标只有一个依赖者，
+    # 这时直接存那个起点（int，与函数起点同一对象），两个及以上才建列表；不再每项一个
+    # 至少 216B 的集合。每个函数的依赖本身是集合、函数起点互不相同，同一 (目标, 起点)
+    # 只会登记一次；读取处再汇总成集合并排序，结果与按集合登记时逐值相同。
+    callers: dict[int, int | list[int]] = {}
+    call_sites: dict[int, int | list[int]] = {}
     for function in functions:
         if not isinstance(function, dict):
             continue
@@ -771,21 +796,11 @@ def local_noreturn(functions: Iterable[dict[str, Any]], targets: Mapping[int, An
         sources[start] = function
         # 已在 targets 中的依赖不会再“新增”，不需要反向索引。
         for dependency in dependencies:
-            if dependency in targets:
-                continue
-            entry = callers.get(dependency)
-            if entry is None:
-                callers[dependency] = {start}
-            else:
-                entry.add(start)
+            if dependency not in targets:
+                _index_add(callers, dependency, start)
         for target in called:
-            if target in targets:
-                continue
-            entry = call_sites.get(target)
-            if entry is None:
-                call_sites[target] = {start}
-            else:
-                entry.add(start)
+            if target not in targets:
+                _index_add(call_sites, target, start)
 
     def may_return(start: int) -> bool:
         # 首轮结论只对首轮的已知集合（targets）成立，用过即弃；之后一律精确判断。
@@ -814,7 +829,7 @@ def local_noreturn(functions: Iterable[dict[str, Any]], targets: Mapping[int, An
             evidence = {"name": name if isinstance(name, str) else f"sub_{start:x}",
                         "evidence": "local_fixed_point", "round": rounds}
             current[start] = found[start] = evidence
-        pending = sorted({caller for start in new for caller in callers.get(start, ())}
+        pending = sorted({caller for start in new for caller in _index_get(callers, start)}
                          - current.keys())
-    rebuild = sorted({caller for start in found for caller in call_sites.get(start, ())})
+    rebuild = sorted({caller for start in found for caller in _index_get(call_sites, start)})
     return found, rebuild, rounds

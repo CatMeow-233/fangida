@@ -7,9 +7,11 @@ prove complete function recovery or resolve every indirect branch.
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
+from itertools import chain
+from operator import is_
 from threading import Event, Lock, get_ident
 from time import perf_counter
 from typing import Any, Callable
@@ -76,6 +78,127 @@ def _references(snapshot: tuple[dict[str, Any], ...], *,
     """Consume only completed processor metadata; never invoke a decoder."""
     return [reference for reference in direct_references(snapshot, include_data=True,
             state=state, data_ranges=data_ranges, reset_at=reset_at) if isinstance(reference["dst"], int)]
+
+
+class _ReferenceStream:
+    """解码进行时把已拼接完成的指令块交给 xref 线程（类似 Ghidra 自动分析中
+    "代码一产出就排队做引用分析"），使引用分析与解码重叠，而不是等全部解码后串行跑。
+
+    每个区域独立维护 ReferenceState，在 xref 线程上按到达顺序（FIFO）处理；提交走
+    XrefStage.submit 的有界信号量（背压）。全部解码结束后 result() 核对：流式收到的指令
+    必须与最终快照逐对象相同、顺序一致，且区域交界处原单遍扫描必然清空状态，才采用
+    流式结果；否则返回 None，调用方按原路径重算，结果与原实现逐字相同。
+    """
+
+    def __init__(self, xref_stage: XrefStage, data_ranges: DataRangeIndex) -> None:
+        self._stage = xref_stage
+        self._ranges = data_ranges
+        self._reset_at: frozenset[int] | None = None
+        # 区域下标 -> [ReferenceState, 收到的快照列表, 引用列表]
+        self._regions: dict[int, list[Any]] = {}
+        self._futures: deque[Future[None]] = deque()
+        self.broken = False
+
+    def __call__(self, regions: list[dict[str, Any]], index: int,
+                 records: list[dict[str, Any]]) -> None:
+        # 在解码协调线程上调用：只登记快照并提交，引用计算在 xref 线程执行。
+        if self.broken or not records:
+            return
+        try:
+            self._submit(regions, index, records)
+        except Exception:
+            # 流式只是加速：任何失败都放弃流式结果，由调用方按原路径重算，不新增告警。
+            self.broken = True
+
+    def _submit(self, regions: list[dict[str, Any]], index: int,
+                records: list[dict[str, Any]]) -> None:
+        if self._reset_at is None:
+            self._reset_at = frozenset(region["address"] for region in regions)
+        entry = self._regions.get(index)
+        if entry is None:
+            entry = self._regions[index] = [ReferenceState(), [], []]
+        # 与原路径相同的批次上限：每批至多 4096 条、不可变 tuple。
+        for offset in range(0, len(records), 4096):
+            snapshot = tuple(records[offset:offset + 4096])
+            entry[1].append(snapshot)
+            # 已完成的 future 及时出队，队列长度受信号量约束。
+            while self._futures and self._futures[0].done():
+                self._futures.popleft().result()
+            self._futures.append(self._stage.submit(self._consume, entry, snapshot, self._reset_at))
+
+    def _consume(self, entry: list[Any], snapshot: tuple[dict[str, Any], ...],
+                 reset_at: frozenset[int]) -> None:
+        entry[2].extend(_references(snapshot, state=entry[0], data_ranges=self._ranges,
+                                    reset_at=reset_at))
+
+    def result(self, instructions: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """等待在途批次；流式结果与原单遍扫描逐字相同时返回引用列表，否则返回 None。
+
+        核对完成后（无论采用与否）立即释放全部快照元组与逐区域引用列表：它们每条指令
+        占一个指针，若随对象存活会一直压在 CFG 与 xref_index 阶段的内存上。
+        """
+        try:
+            return self._result(instructions)
+        finally:
+            # 此时在途批次已全部取出（异常路径上残留的 future 只写入已丢弃的列表）。
+            self._regions = {}
+            self._futures.clear()
+
+    def _result(self, instructions: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        try:
+            while self._futures:
+                self._futures.popleft().result()
+        except Exception:
+            self.broken = True
+        if self.broken or not self._regions:
+            return None
+        # 按区域首条指令地址排序；区域内快照按地址升序到达。
+        ordered = sorted(self._regions.values(), key=lambda entry: entry[1][0][0]["addr"])
+        streamed = sum(len(snapshot) for entry in ordered for snapshot in entry[1])
+        if streamed != len(instructions):
+            return None
+        if not all(map(is_, chain.from_iterable(chain.from_iterable(entry[1] for entry in ordered)),
+                       instructions)):
+            return None
+        reset_at = self._reset_at or frozenset()
+        for previous, entry in zip(ordered, ordered[1:]):
+            # 原单遍扫描在区域交界处必须清空状态（落在区域起点，或与上一条指令不连续）；
+            # 否则跨区域的 ARM64 地址状态可能延续，流式结果不保证相同。
+            last, first = previous[1][-1][-1], entry[1][0][0]
+            if first["addr"] not in reset_at and first["addr"] == last["addr"] + last["size"]:
+                return None
+        # 直接沿用首个区域的引用列表依次接上其余区域（顺序与逐项拼接相同），
+        # 不再另建一份全量指针列表；全部批次已完成，这些列表不再被其它线程写入。
+        merged = ordered[0][2]
+        for entry in ordered[1:]:
+            merged.extend(entry[2])
+        return merged
+
+
+def _windowed(pool: ThreadPoolExecutor | None, function: Callable[[Any], Any], items: list[Any],
+              window: int, stop: Callable[[], bool]):
+    """有界滑动窗口（类似 Ghidra ConcurrentQ）：在途任务始终保持 window 个，按提交顺序产出结果。
+
+    取代"整批提交、整批等待"：一批里的大函数不再让其它线程空等到批次结束。stop() 在每次
+    提交新任务前检查；返回真后不再提交，已在途的任务照常完成并产出（与原批次语义一致）。
+    """
+    if pool is None:
+        for item in items:
+            if stop():
+                return
+            yield function(item)
+        return
+    pending: deque[Future[Any]] = deque()
+    position = 0
+    while position < len(items) and len(pending) < window and not stop():
+        pending.append(pool.submit(function, items[position]))
+        position += 1
+    while pending:
+        result = pending.popleft().result()
+        if position < len(items) and not stop():
+            pending.append(pool.submit(function, items[position]))
+            position += 1
+        yield result
 
 
 def _resync_anchors(image: BinaryImage) -> list[int]:
@@ -460,10 +583,14 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
     pool_workers = min(workers, MAX_WORKERS) if type(workers) is int else workers
     # 解码子进程数只用于统计；full_decode_workers_used 仍只计进程内参与解码/协调的线程。
     decode_diagnostics: dict[str, Any] = {}
+    data_ranges = DataRangeIndex(mapped_data_ranges(image.sections, kind=image.format, file_size=len(data)))
+    # 引用分析在独立线程时，与解码流水线重叠；单线程预算时保持原来的串行顺序。
+    stream = _ReferenceStream(xref_stage, data_ranges) if xref_stage.separate_thread else None
+    stream_options: dict[str, Any] = {"on_records": stream} if stream is not None else {}
     cache, coverage, notes = stream_decode_regions(
         data, image, workers=pool_workers, is_cancelled=cancelled if is_cancelled else None,
         on_progress=on_progress, include_data=True, diagnostics=decode_diagnostics,
-        anchors=_resync_anchors(image))
+        anchors=_resync_anchors(image), **stream_options)
     warnings.extend(notes)
     phases["disassembly"] = perf_counter() - started
     decode_workers = {item.pop("worker_id", None) for item in coverage}
@@ -481,15 +608,24 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
             on_decoded(instructions, preview_coverage, preview_functions)
         except Exception as exc:
             warnings.append(f"Preview callback failed: {type(exc).__name__}: {exc}")
+        # 预览种子此后不再使用：不让本栈帧把它们一直持有到函数返回（CFG、xref_index 全程）。
+        preview_functions = preview_coverage = None
     refs: list[dict[str, Any]] = []
     stamp = perf_counter()
     xref_instructions = 0
     reference_state = ReferenceState()
-    data_ranges = DataRangeIndex(mapped_data_ranges(image.sections, kind=image.format, file_size=len(data)))
     region_starts = frozenset(item["address"] for item in coverage)
+    # 取消时与原实现一致：不采用流式结果，下面的循环在首批之前退出。
+    streamed = stream.result(instructions) if stream is not None and not cancelled() else None
+    # 流对象（含逐批快照与逐区域引用列表）此后不再使用；取消路径不调用 result()，
+    # 同样在这里放手（在途批次由 xref 线程照常完成，只写入已丢弃的列表）。
+    stream = stream_options = None
+    if streamed is not None:
+        refs = streamed
+        xref_instructions = len(instructions)
     # A bounded batch is transferred once; no repeated decode or per-function
     # reference submissions. Results remain useful when later work cancels.
-    for offset in range(0, len(instructions), 4096):
+    for offset in range(0, len(instructions) if streamed is None else 0, 4096):
         if cancelled():
             break
         snapshot = tuple(instructions[offset:offset + 4096])
@@ -540,7 +676,9 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
             seed, decoder, known, set(), len(cache) + 1, len(cache) + 1,
             is_cancelled=cancelled if is_cancelled is not None else None,
             validate_overlaps=False, collect_xrefs=False,
-            compute_liveness=False, noreturn_targets=targets, noreturn_sites=sites)
+            compute_liveness=False, noreturn_targets=targets, noreturn_sites=sites,
+            # 完整模式的结果长期驻留：地址复用指令记录自带的 int、块指令列表收紧到实际长度。
+            compact=True)
         fn["analysis_scope"] = "full_region_recovered_function"
         fn["cfg"]["scope"] = "full_region_recovered_function"
         # 完整模式统一给出审计字段（未截断任何调用时为空列表）。
@@ -565,18 +703,15 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
     pool = (ThreadPoolExecutor(max_workers=pool_workers, thread_name_prefix="fangida-full-cfg")
             if pool_workers > 1 else None)
     try:
-        for offset in range(0, len(pending), max(1, pool_workers * 2)):
-            if cancelled():
-                break
-            batch = pending[offset:offset + max(1, pool_workers * 2)]
-            results = list(pool.map(cfg, batch)) if pool else [cfg(seed) for seed in batch]
-            for fn, seen, worker_id in results:
-                functions.append(fn)
-                reached.update(seen)
-                seen_total += len(seen)
-                worker_ids.add(worker_id)
-            emit("cfg", completed_functions=len(functions), total_functions=len(pending),
-                 reached_instructions=len(reached))
+        step = max(1, pool_workers * 2)
+        for done, (fn, seen, worker_id) in enumerate(_windowed(pool, cfg, pending, step, cancelled), 1):
+            functions.append(fn)
+            reached.update(seen)
+            seen_total += len(seen)
+            worker_ids.add(worker_id)
+            if done % step == 0 or done == len(pending):
+                emit("cfg", completed_functions=len(functions), total_functions=len(pending),
+                     reached_instructions=len(reached))
         # 本地不动点：在已完成的 CFG 上推导“所有出口都不返回”的函数（协调线程只读 CFG，
         # 不解码、不建引用）；新增的不返回函数只重建其调用者，重建仍在同一 CFG 线程池执行。
         if not cancelled() and functions:
@@ -592,22 +727,16 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
                 exclusive = seen_total == len(reached)
                 removed: set[int] = set()
                 grown = False
-                for offset in range(0, len(again), step):
-                    if cancelled():
-                        break
-                    batch = again[offset:offset + step]
-                    results = (list(pool.map(rebuild_cfg, batch)) if pool
-                               else [rebuild_cfg(seed) for seed in batch])
-                    for fn, seen, worker_id in results:
-                        position = positions[fn["start"]]
-                        # 只为被重建的函数从旧 CFG 取回原可达集合。
-                        old = {instruction["addr"] for block in functions[position]["blocks"]
-                               for instruction in block["instructions"]}
-                        removed |= old - seen
-                        grown = grown or not seen <= old
-                        functions[position] = fn
-                        worker_ids.add(worker_id)
-                        rebuilt += 1
+                for fn, seen, worker_id in _windowed(pool, rebuild_cfg, again, step, cancelled):
+                    position = positions[fn["start"]]
+                    # 只为被重建的函数从旧 CFG 取回原可达集合。
+                    old = {instruction["addr"] for block in functions[position]["blocks"]
+                           for instruction in block["instructions"]}
+                    removed |= old - seen
+                    grown = grown or not seen <= old
+                    functions[position] = fn
+                    worker_ids.add(worker_id)
+                    rebuilt += 1
                 if rebuilt and exclusive and not grown:
                     # 重建只截掉落空边（新集合是旧集合的子集），被截掉的指令此前只属于该函数：
                     # 增量结果与按最终 CFG 重新汇总全部函数相同。
@@ -616,6 +745,8 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
                     # 存在被多个函数共享的指令（或重建意外新增了指令）：按最终 CFG 重新汇总。
                     reached = {instruction["addr"] for fn in functions
                                for block in fn["blocks"] for instruction in block["instructions"]}
+                # 重建用的起点索引与差集只在上面用到，不带进第二轮与之后的阶段。
+                positions = again = removed = old = None
         # 第二轮：容器数据指针候选（ELF RELATIVE/ABS/GLOB_DAT、PE 基址重定位）只在首轮
         # CFG 之后处理——此时才知道哪些指令已被认领。种子计算在协调线程，只消费已完成的
         # 重定位、指令快照与首轮 CFG，不解码、不新建引用；按相邻槽位组成的指针表做表级
@@ -645,6 +776,8 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
                 pointer_size=image.bits // 8 if image.bits in (32, 64) else None,
                 executable=[(item.address, item.address + item.size) for item in regions],
                 code_bytes=code_bytes, details=pointer_details)
+            # 原始候选只用于裁决（计数已记入 pointer_candidate_count），不带进第二轮建图。
+            raw_candidates = None
             if pointer_accepted:
                 # 接受的入口互为已知边界（与首轮种子一致）。建图前先全部计入 pending：
                 # 中途取消时未建图的种子以 not_decoded 出现，完整度统计为 false。
@@ -654,19 +787,14 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
                 # 绑定的是不动点之前的旧字典）。
                 pointer_cfg = partial(cfg, targets=noreturn_targets, sites=noreturn_sites)
                 step = max(1, pool_workers * 2)
-                for offset in range(0, len(pointer_accepted), step):
-                    if cancelled():
-                        break
-                    batch = pointer_accepted[offset:offset + step]
-                    results = (list(pool.map(pointer_cfg, batch)) if pool
-                               else [pointer_cfg(seed) for seed in batch])
-                    for fn, seen, worker_id in results:
-                        functions.append(fn)
-                        reached.update(seen)
-                        worker_ids.add(worker_id)
-                        pointer_built += 1
-                    emit("cfg", completed_functions=len(functions),
-                         total_functions=len(pending), reached_instructions=len(reached))
+                for fn, seen, worker_id in _windowed(pool, pointer_cfg, pointer_accepted, step, cancelled):
+                    functions.append(fn)
+                    reached.update(seen)
+                    worker_ids.add(worker_id)
+                    pointer_built += 1
+                    if pointer_built % step == 0 or pointer_built == len(pointer_accepted):
+                        emit("cfg", completed_functions=len(functions),
+                             total_functions=len(pending), reached_instructions=len(reached))
                 # 第二轮函数的本地不动点：首轮不动点只覆盖首轮 CFG，这里在第二轮建好的 CFG 上
                 # 补算，使只经指针到达、所有出口都不返回的函数与首轮同形函数一样得到 noreturn
                 # 标注。协调线程只读已完成的 CFG，不解码、不建引用。第二轮函数没有直接调用者：
@@ -703,10 +831,26 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
     functions.extend({**seed, "analysis_scope": "not_decoded"} for seed in (*seeds, *pointer_accepted)
                      if seed["start"] not in analyzed)
     # Retain aliases previously supplied by the public loader API.
-    names = {(fn["start"], fn.get("name")) for fn in functions}
+    # 只为起点与 Loader 符号相同的函数建 (start, name)：其余函数不可能命中下面的判断，
+    # 不必为全部函数各建一个元组。
+    symbol_starts = {symbol["start"] for symbol in image.functions}
+    names = {(fn["start"], fn.get("name")) for fn in functions if fn["start"] in symbol_starts}
     functions.extend({**symbol, "analysis_scope": "not_decoded"} for symbol in image.functions
                      if (symbol["start"], symbol.get("name")) not in names)
+    names = symbol_starts = None
     phases["cfg"] = perf_counter() - stamp
+    # CFG 已全部完成（线程池已关闭，cfg 闭包不再被调用）：先算好依赖 CFG 局部状态的统计，
+    # 再放开地址索引、可达集合与种子表，不让它们叠加在 xref_index 与结果组装上。
+    instruction_total = len(cache)
+    reached_total = len(reached)
+    # reached 按构造是 cache 键的子集（只来自 _CachedDecoder 命中的地址或块内记录的 addr），
+    # 差集大小就是长度之差。键视图的 >= 只逐个检查成员，不像 keys() - reached 那样先把
+    # 全部键复制成一个新集合；万一不是子集仍按原表达式计算，结果逐值相同。
+    unassigned = (instruction_total - reached_total if cache.keys() >= reached
+                  else len(cache.keys() - reached))
+    function_sources = dict(Counter(seed.get("source", "unknown")
+                                    for seed in (*seeds, *pointer_accepted)))
+    cache = addresses = reached = known = seeds = pending = seeds_by_start = raw_candidates = None
     stamp = perf_counter()
     xref_stage.run(index_references, functions, refs)
     phases["xref_index"] = perf_counter() - stamp
@@ -714,15 +858,14 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
     decoded_bytes = sum(item["decoded_bytes"] for item in coverage)
     executable_bytes = sum(item["size"] for item in coverage)
     decode_complete = bool(coverage) and all(item["complete"] for item in coverage)
-    unassigned = len(cache.keys() - reached)
     metadata = {"full_disassembly": instructions,
                 "full_analysis": {"enabled": True,
                     "scope": "all_file_backed_executable_regions",
                     "executable_bytes": executable_bytes, "decoded_bytes": decoded_bytes,
-                    "decode_complete": decode_complete, "instruction_count": len(cache),
+                    "decode_complete": decode_complete, "instruction_count": instruction_total,
                     "unassigned_instructions": unassigned,
                     "function_recovery_complete": False, "regions": coverage,
-                    "xref_pass_complete": xref_instructions == len(cache),
+                    "xref_pass_complete": xref_instructions == instruction_total,
                     "cfg_pass_complete": cfg_complete,
                     "xref_scope": "direct_control_flow_resolved_memory_and_mapped_pointer_constants",
                     # 新增：不返回调用目标及其证据（地址升序），供审计与下游使用。
@@ -756,20 +899,21 @@ def analyze_full(data: bytes, image: BinaryImage, *, workers: int,
                         "rejected_tables": pointer_details.get("rejected_tables", {}),
                         "unconfirmed_total": pointer_details.get("unconfirmed_total", 0),
                         "unconfirmed": pointer_details.get("unconfirmed", [])}}}
-    stats = {"full_analysis": True, "full_instructions": len(cache),
+    stats = {"full_analysis": True, "full_instructions": instruction_total,
              "full_decoded_bytes": decoded_bytes, "full_executable_bytes": executable_bytes,
              "full_decode_complete": decode_complete,
              "full_cfg_functions": len(analyzed),
              "full_xref_instructions": xref_instructions,
-             "full_xref_pass_complete": xref_instructions == len(cache),
+             # 新增字段：引用分析是否与解码重叠完成（False 表示按原路径串行计算）。
+             "full_xref_streamed": streamed is not None,
+             "full_xref_pass_complete": xref_instructions == instruction_total,
              "full_cfg_pass_complete": cfg_complete,
              "full_unassigned_instructions": unassigned,
-             "full_function_sources": dict(Counter(seed.get("source", "unknown")
-                                                    for seed in (*seeds, *pointer_accepted))),
+             "full_function_sources": function_sources,
              "full_decode_workers_used": len(decode_workers),
              "full_decode_processes_used": decode_diagnostics.get("processes_used", 0),
              "full_cfg_workers_used": len(worker_ids), "phase_seconds": phases,
-             "semantic_functions": len(analyzed), "semantic_instructions": len(reached),
+             "semantic_functions": len(analyzed), "semantic_instructions": reached_total,
              "semantic_budget_exhausted": False, "semantic_cancelled": cancelled(),
              "semantic_workers_requested": workers, "semantic_workers_used": len(worker_ids),
              "semantic_parallel_functions": len(analyzed) if workers > 1 else 0,

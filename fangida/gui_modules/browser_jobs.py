@@ -93,6 +93,20 @@ class _JobsMixin:
         self._generation += 1
         generation = self._generation
         self._view = None
+        # 旧结果的标注索引与按需伪代码状态都引用旧快照：不在这里释放的话，它们要等新结果显示后
+        # 首次标注或生成伪代码时才被替换，整个新分析期间旧快照一直存活。两者都只是可重建的缓存
+        # （标注索引按快照身份失效，伪代码状态按 generation 惰性重建），提前释放不改变行为。
+        cache = getattr(self, "_annotation_cache", None)
+        if cache is not None:
+            cache.clear()
+        jobs = getattr(self, "_pseudocode_job_state", None)
+        if jobs is not None:
+            # 与 _pseudocode_jobs 换代时相同：排队的请求不再生成；正在生成的那一个完成后，
+            # 它的工作线程随即退出，发出的结果因 generation 不符被 _drain 丢弃。
+            with jobs.lock:
+                jobs.cancelled = True
+                jobs.waiting.clear()
+            self._pseudocode_job_state = None
         if hasattr(self, "workbench"):
             self.workbench.reset()
             self.workspace.log(f"{action} {path}")

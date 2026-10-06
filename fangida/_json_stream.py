@@ -1,7 +1,7 @@
 """与 ``json.JSONEncoder.iterencode`` 逐字节一致的分块 JSON 流式编码（包内私有实现）。
 
 本模块只供 Fangida 包内使用（CLI 导出、测速摘要、数据库/项目快照输出），不属于公开 API，
-可随实现调整。包内调用方依赖的接口：``dump``、``iterencode``、``iterencode_with``、
+可随实现调整。包内调用方依赖的接口：``dump``、``write_text``、``iterencode``、``iterencode_with``、
 ``c_indent_supported``、``c_compact_supported`` 与 ``DEFAULT_CHUNK_SIZE``。
 
 标准库 ``JSONEncoder.iterencode`` 为了“流式”总是走纯 Python 生成器编码器：每个标点、
@@ -40,9 +40,11 @@
 """
 from __future__ import annotations
 
+import codecs
 from itertools import islice
 import json
 from json import encoder as _std
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 #: 默认输出块大小（字符数）。1 MiB 在写文件/计算摘要时已经足够摊薄调用开销。
@@ -154,6 +156,16 @@ def c_compact_supported() -> bool:
 
 def c_indent_supported() -> bool:
     """当前解释器的 C 编码器是否可用于带缩进的单元编码（结果缓存）。"""
+    return _c_indent_ok()
+
+
+def _c_indent_ok() -> bool:
+    """``c_indent_supported`` 的实际自检与缓存。
+
+    流式编码器只看这里的真实自检结果，不经过公开探测函数：调用方（或测试）替换
+    ``c_indent_supported`` 只用来决定 ``dumps`` 是否直接调用 ``json.dumps``，不会让
+    3.11/3.12 上忽略缩进参数的 C 编码器被拿来做带缩进的单元编码。
+    """
     global _C_INDENT_OK
     if _C_INDENT_OK is None:
         _C_INDENT_OK = _check_c_indent()
@@ -232,7 +244,7 @@ class _Streamer:
 
     def _make_c_unit(self) -> Callable[[Any, int], str] | None:
         make = getattr(_std, "c_make_encoder", None)
-        if make is None or not (c_indent_supported() if self.indent is not None
+        if make is None or not (_c_indent_ok() if self.indent is not None
                                 else c_compact_supported()):
             return None
         try:
@@ -623,3 +635,37 @@ def dump(obj: Any, stream: Any, *, chunk_size: int = DEFAULT_CHUNK_SIZE, **optio
     write = stream.write
     for chunk in iterencode(obj, chunk_size=chunk_size, **options):
         write(chunk)
+
+
+def write_text(path: Any, obj: Any, *, end: str = "", encoding: str = "utf-8",
+               chunk_size: int = DEFAULT_CHUNK_SIZE, **options: Any) -> None:
+    """与 ``Path(path).write_text(dumps(obj, **options) + end, encoding=encoding)`` 写出逐字节
+    相同的文件，但不生成整串：额外峰值约为一个输出块，而不是整份文本的几倍。
+
+    整串写出的语义是“先完整序列化、再一次写入”：序列化或按 ``encoding`` 编码失败时，目标文件
+    不会被创建或截断。这里先把全部块编码一遍做校验（只检查、不保留文本），确认不会失败后才以
+    ``"w"`` 模式原地打开目标——与 ``write_text`` 一样截断原文件，保留 inode、属主、权限与硬链接，
+    也不需要目录可写——再流式重新编码写出。代价是多编码一遍。
+
+    校验阶段一旦失败，改走原来的整串写入：异常类型与内容、目标文件的状态都与原实现完全相同。
+    """
+    # 块大小是本函数自己的参数，非法时直接报错，不能被下面的校验吞掉后悄悄改走整串写入。
+    _check_chunk_size(chunk_size)
+    try:
+        # 按 UTF-8 编码时纯 ASCII 块一定可编码，只有含非 ASCII 字符的块（如中文告警、伪 C 注释，
+        # 或孤立代理项）才需要真正编码一次检查；编码结果立即丢弃。
+        utf8 = codecs.lookup(encoding).name == "utf-8"
+        for chunk in iterencode(obj, chunk_size=chunk_size, **options):
+            if not (utf8 and chunk.isascii()):
+                chunk.encode(encoding)
+        end.encode(encoding)
+    except MemoryError:
+        raise
+    except Exception:
+        # 例如不可序列化的对象、循环引用或无法按 encoding 编码的字符：按原实现处理（通常同样
+        # 抛出相同的异常，且序列化失败时不碰目标文件）。
+        Path(path).write_text(dumps(obj, **options) + end, encoding=encoding)
+        return
+    with open(path, "w", encoding=encoding) as stream:
+        dump(obj, stream, chunk_size=chunk_size, **options)
+        stream.write(end)

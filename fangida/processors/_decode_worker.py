@@ -27,7 +27,11 @@ import time
 import types
 from typing import Any, Callable, Sequence
 
-PROTOCOL = 3  # 2：一个请求携带多个作业（小区域合批）；3：作业可带第 7 项重同步锚点
+# 记录的键顺序与紧凑重建在处理器（decoder）中定义，两端共用并计入代码指纹。
+from .decoder import RECORD_KEYS, record_from_row, records_from_rows  # noqa: F401（供父进程使用）
+
+PROTOCOL = 4  # 2：一个请求携带多个作业（小区域合批）；3：作业可带第 7 项重同步锚点；
+              # 4：应答中的记录可按 RECORD_KEYS 顺序以元组传输（第 5 项 ROWS），父进程重建紧凑 dict
 _MAGIC = b"FDW1"
 _HEADER = struct.Struct("<4sQ")
 # 单条消息上限：远大于任何切块的结果，只用于拒绝损坏的帧头，避免巨量分配。
@@ -140,6 +144,137 @@ def sweep(decode: Callable[..., tuple[list[dict[str, Any]], list[str]]], code: b
     return addrs, records, gaps, cursor
 
 
+# 应答第 5 项的标记：该作业的记录是按 RECORD_KEYS 顺序的元组（行），不是 dict。
+ROWS = "rows"
+_SCALARS = frozenset({int, str, bool, float, bytes, type(None)})
+
+
+def _frozen(value: Any) -> Any:
+    """可哈希、带类型标记的递归冻结键：等值但类型不同的标量（1/True/1.0）不会被当成同一值。
+
+    字典的键顺序也是内容的一部分；列表等不支持的类型抛出 TypeError（调用方保留原对象）。
+    """
+    kind = type(value)
+    if kind is str or kind is int:
+        return (kind, value)
+    if kind is dict:
+        return ("d",) + tuple([(_frozen(key), _frozen(item)) for key, item in value.items()])
+    if kind is tuple:
+        return ("t",) + tuple([_frozen(item) for item in value])
+    if kind in _SCALARS:
+        return (kind, value)
+    raise TypeError(f"unshareable {kind.__name__}")
+
+
+def _share_dict(canonical: dict[Any, Any], key: str, value: dict[str, Any]) -> dict[str, Any]:
+    """返回与 value 值相同（含键顺序）的共享字典；首次出现的值登记为共享实例。"""
+    try:
+        # 带类型标记，避免与同值的元组/字符串键冲突；键顺序也是内容的一部分。
+        return canonical.setdefault((key, tuple(value.items())), value)
+    except TypeError:
+        pass  # 含字典等不可哈希的值（如 address_operation）：改用冻结键
+    try:
+        marker = (key, _frozen(value))
+    except TypeError:
+        return value  # 含列表等无法冻结的值：保留独立对象
+    found = canonical.get(marker)
+    if found is None:
+        # 首次出现：嵌套字典（address_operation）同样按冻结键共享后再登记。
+        for name, item in value.items():
+            if type(item) is dict:
+                value[name] = canonical.setdefault((name, _frozen(item)), item)
+        found = canonical[marker] = value
+    return found
+
+
+def share_records(results: list[Any]) -> None:
+    """在一个应答帧内把值相同的子对象换成同一个实例（值逐字不变），并把记录换成行。
+
+    marshal 在同一次 dumps 内按对象身份去重，父进程 loads 后得到的也是共享对象：
+    指令记录里大量重复的 arch_meta / branch_info 字典、operands/reads/writes 元组
+    （以及元组内的寄存器名、操作数字符串）与助记符字符串只占一份内存，反序列化也更快
+    （实测完整指令记录约 762 字节/条，几千万条指令时内存超过物理内存而大量换页）。
+    含嵌套字典（address_operation）的 arch_meta 按带类型标记的冻结键共享。
+
+    一个作业的记录全部是键与键顺序都为 RECORD_KEYS 的 dict 时，改为按该顺序的元组，
+    结果变为 ``(地址列表, 行列表, 缺口, 结束游标, ROWS)``：帧不再逐条携带键（约小 44%），
+    父进程用 ``records_from_rows`` 重建与原记录逐值相同的紧凑 dict。其他作业原样发送。
+    解码记录在交付后不再被就地修改（各层只读这些子对象）。
+    """
+    canonical: dict[Any, Any] = {}
+    shared = canonical.setdefault
+    tuples: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+
+    def share_tuple(value: tuple[Any, ...]) -> tuple[Any, ...]:
+        # 每个不同的元组只重建一次：元组内的字符串也按值共享（marshal 因此只写一次）。
+        try:
+            found = tuples.get(value)
+            if found is None:
+                found = tuples[value] = tuple([shared(item, item) if type(item) is str else item
+                                               for item in value])
+            return found
+        except TypeError:
+            return value  # 含不可哈希的元素：保留原元组
+
+    for index, result in enumerate(results):
+        if result is None:
+            continue
+        rows: list[tuple[Any, ...]] | None = []
+        append = rows.append
+        for record in result[1]:
+            if type(record) is not dict or tuple(record) != RECORD_KEYS:
+                rows = None
+                break
+            address, size, mnemonic, operands, reads, writes, branch, metadata = record.values()
+            if type(mnemonic) is str:
+                mnemonic = shared(mnemonic, mnemonic)
+            # 已见过的元组直接取共享实例（常见情形不进入函数调用）；空元组本身就是单例。
+            if type(operands) is tuple and operands:
+                try:
+                    operands = tuples[operands]
+                except (KeyError, TypeError):
+                    operands = share_tuple(operands)
+            if type(reads) is tuple and reads:
+                try:
+                    reads = tuples[reads]
+                except (KeyError, TypeError):
+                    reads = share_tuple(reads)
+            if type(writes) is tuple and writes:
+                try:
+                    writes = tuples[writes]
+                except (KeyError, TypeError):
+                    writes = share_tuple(writes)
+            if type(branch) is dict:
+                try:
+                    branch = shared(("branch_info", tuple(branch.items())), branch)
+                except TypeError:
+                    branch = _share_dict(canonical, "branch_info", branch)
+            if type(metadata) is dict:
+                try:
+                    metadata = shared(("arch_meta", tuple(metadata.items())), metadata)
+                except TypeError:
+                    metadata = _share_dict(canonical, "arch_meta", metadata)
+            append((address, size, mnemonic, operands, reads, writes, branch, metadata))
+        if rows is not None:
+            results[index] = (result[0], rows, result[2], result[3], ROWS)
+            continue
+        # 非标准形状的作业：只在原记录上共享子对象，仍以 dict 发送。
+        for record in result[1]:
+            if type(record) is not dict:
+                continue
+            mnemonic = record.get("mnemonic")
+            if type(mnemonic) is str:
+                record["mnemonic"] = shared(mnemonic, mnemonic)
+            for key in ("operands", "reads", "writes"):
+                value = record.get(key)
+                if type(value) is tuple:
+                    record[key] = share_tuple(value)
+            for key in ("branch_info", "arch_meta"):
+                value = record.get(key)
+                if type(value) is dict:
+                    record[key] = _share_dict(canonical, key, value)
+
+
 def _read_exact(stream: Any, size: int) -> bytearray:
     buffer = bytearray(size)
     view, received = memoryview(buffer), 0
@@ -242,6 +377,9 @@ def _compute_fingerprint() -> str:
         _feed(digest, value, decoder.__name__)
     _feed(digest, sweep, __name__)
     _feed(digest, following_anchor, __name__)
+    # 应答的行格式与共享方式也是协议的一部分：两端代码不同则握手失败、回退进程内解码。
+    for value in (share_records, _share_dict, _frozen, ROWS, _SCALARS):
+        _feed(digest, value, __name__)
     return digest.hexdigest()
 
 
@@ -322,6 +460,7 @@ def main() -> int:
                 except Exception:
                     # 未预期的解码异常：让父进程用原串行循环重做该区域，由它产生既有告警文本。
                     results.append(None)
+            share_records(results)
             write_message(output, (task, results))
         finally:
             if pause_gc:

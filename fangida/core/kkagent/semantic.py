@@ -331,13 +331,20 @@ def _analyze_function(seed: dict[str, Any], decoder: _Decoder,
                       collect_xrefs: bool = True,
                       compute_liveness: bool = True,
                       noreturn_targets: Mapping[int, Any] | None = None,
-                      noreturn_sites: Mapping[int, Any] | None = None
+                      noreturn_sites: Mapping[int, Any] | None = None,
+                      compact: bool = False
                       ) -> tuple[dict[str, Any], list[dict[str, Any]], set[int], set[int]]:
     """noreturn_targets（调用目标 → 证据）与 noreturn_sites（间接调用指令地址 → 证据）可选：
     二者都为空时行为与原实现完全相同；否则对不返回目标的无条件调用不跟随顺序落空边，
     并在 cfg["noreturn_calls"] 中逐条记录（from/fallthrough/target/name/evidence）。
     落空目标本身是陷阱指令时（不返回调用之后的 ud2/brk #1/int3）仍保留这条边，记录中
-    额外带 fallthrough_trap=True（缺省表示 False）。"""
+    额外带 fallthrough_trap=True（缺省表示 False）。
+
+    compact（可选，缺省 False 与原实现完全相同）：完整模式的结果长期驻留，传 True 时
+    已接受指令的地址、块起点与跨块落空边/后继的目标复用指令记录自带的 addr 对象（只在
+    二者都是 int 且相等时替换，值与类型不变），而不是保留 address + size 新算出的 int；
+    块指令列表按实际长度收紧（仍是同一批记录、仍是 list）。返回的可达集合因此也由记录
+    自带的 int 组成。"""
     start = seed["start"]
     size = seed.get("size")
     boundary_known = isinstance(size, int) and size > 0
@@ -387,6 +394,12 @@ def _analyze_function(seed: dict[str, Any], decoder: _Decoder,
         if ins is None:
             frontier.append({"from": source, "to": address, "reason": reason})
             continue
+        if compact and type(address) is int:
+            # 落空地址是 address + size 新算出的 int：换成记录自带的同值对象，
+            # 使 instructions 的键（进而块、边与可达集合）不再各自持有一份。
+            canonical = ins.get("addr")
+            if type(canonical) is int and canonical == address:
+                address = canonical
         if validate_overlaps:
             crossed, position = _crosses_accepted(ordered, instructions, address, ins["size"])
             if crossed:
@@ -473,6 +486,11 @@ def _analyze_function(seed: dict[str, Any], decoder: _Decoder,
         if leader in visited:
             continue
         members: list[dict[str, Any]] = []
+        if compact and type(leader) is int:
+            # 起点可能来自落空目标（新算出的 int）：换成首条指令记录自带的同值对象。
+            canonical = instructions[leader].get("addr")
+            if type(canonical) is int and canonical == leader:
+                leader = canonical
         blocks.append({"start": leader, "instructions": members, "successors": []})
         cursor = leader
         while cursor in instructions and cursor not in visited:
@@ -483,6 +501,9 @@ def _analyze_function(seed: dict[str, Any], decoder: _Decoder,
             if following is None or ins["branch_info"] or following in leaders:
                 break
             cursor = following
+        if compact:
+            # 逐条 append 的列表有超额容量（1–3 条的块多占 8–24B）；换成精确尺寸的同内容列表。
+            blocks[-1]["instructions"] = members[:]
     # A converging incoming edge could reveal another leader after linear
     # grouping. Keep the graph total even in that rare case.
     for address in sorted(instructions.keys() - visited):
@@ -504,6 +525,12 @@ def _analyze_function(seed: dict[str, Any], decoder: _Decoder,
         if target is not None:
             other = block_start.get(target)
             if other is not None and other != owner:
+                if compact and type(target) is int:
+                    # 跨块落空目标同样换成记录自带的同值 int（边与后继长期驻留）。
+                    record = instructions.get(target)
+                    canonical = record.get("addr") if record is not None else None
+                    if type(canonical) is int and canonical == target:
+                        target = canonical
                 graph_edges.append({"src": address, "dst": target, "kind": "fallthrough"})
                 # 每个源至多两条边；去重后排序，与原 set 语义一致。
                 seen_targets = destinations.get(address)

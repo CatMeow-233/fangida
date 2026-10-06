@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from typing import Any, Callable
 
 from ..models import Instruction
@@ -127,6 +128,61 @@ _X86_NUMBER_STARTS = frozenset("-0123456789")
 # 填充值；把它们当候选会让基址为 0 的映像（.o/.ko）在 0–9 处产生大量伪数据引用。
 # 预过滤与结构化提取使用同一文本规则，因此预过滤仍不会漏掉任何候选。
 _X86_HEX_IMMEDIATE = ("0x", "-0x")
+
+
+# 快路径指令记录的键与顺序（与 Instruction.to_dict() 的字段顺序相同）。
+RECORD_KEYS = ("addr", "size", "mnemonic", "operands", "reads", "writes", "branch_info", "arch_meta")
+
+
+class _CompactRecord:
+    """只用来构造指令记录 dict：取 vars() 之后实例立即丢弃。
+
+    CPython 3.11+ 的实例字典与类共享键表（拆分表），8 键记录约 160 字节，而同内容的
+    字面量 dict 是 272 字节（几千万条指令时相差数 GB）。得到的仍是普通 dict
+    （type is dict），键、键顺序与值都和字面量相同，json/marshal/pickle 输出逐字节相同；
+    下游给记录新增键时 CPython 自动转换存储，语义不变。
+    """
+
+    def __init__(self, addr: int, size: int, mnemonic: str, operands: tuple[str, ...],
+                 reads: tuple[str, ...], writes: tuple[str, ...], branch_info: dict[str, Any],
+                 arch_meta: dict[str, Any]) -> None:
+        self.addr = addr
+        self.size = size
+        self.mnemonic = mnemonic
+        self.operands = operands
+        self.reads = reads
+        self.writes = writes
+        self.branch_info = branch_info
+        self.arch_meta = arch_meta
+
+
+def _compact_supported() -> bool:
+    """导入时自检：只有实例字典确实是键序相同且更小的普通 dict 时才启用紧凑记录。"""
+    try:
+        # CPython 3.13 在前若干个实例里逐步收紧内联值容量：先预热，再比较稳定后的大小。
+        for _ in range(64):
+            probe = vars(_CompactRecord(*RECORD_KEYS))
+        return (type(probe) is dict and tuple(probe) == RECORD_KEYS
+                and list(probe.values()) == list(RECORD_KEYS)
+                and sys.getsizeof(probe) < sys.getsizeof(dict(zip(RECORD_KEYS, RECORD_KEYS))))
+    except Exception:
+        # PyPy 等实现的 getsizeof 可能不可用：退回普通 dict，只放弃内存收益。
+        return False
+
+
+COMPACT_RECORDS = _compact_supported()
+
+
+def record_from_row(row: Any) -> dict[str, Any]:
+    """按 RECORD_KEYS 顺序的 8 项 -> 值与键顺序都相同的普通 dict（支持时为紧凑存储）。"""
+    return vars(_CompactRecord(*row)) if COMPACT_RECORDS else dict(zip(RECORD_KEYS, row))
+
+
+def records_from_rows(rows: Any) -> list[dict[str, Any]]:
+    """批量版 record_from_row（解码子进程按行传回的记录在父进程重建）。"""
+    if COMPACT_RECORDS:
+        return [vars(_CompactRecord(*row)) for row in rows]
+    return [dict(zip(RECORD_KEYS, row)) for row in rows]
 
 
 _LINE = re.compile(r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2}\s+)+)\s*(\S+)(?:\s+(.*))?$", re.I)
@@ -389,6 +445,9 @@ class NativeDecoder:
             operand_cache: dict[str, tuple[str, ...]] = {}
             # 寄存器名元组只有少量不同取值（challenge 上约两百种）：按值共享不可变元组以降低常驻内存。
             interned: dict[tuple[str, ...], tuple[str, ...]] = {}
+            # 记录用紧凑的普通 dict 构造（见 _CompactRecord）；不支持时仍用字面量。
+            # 每条记录仍拥有自己的 branch_info / arch_meta 字典。
+            compact = _CompactRecord if COMPACT_RECORDS else None
             for ins in decoder.disasm(code, address, count=max_instructions):
                 mnemonic, instruction_address, instruction_size = ins.mnemonic, ins.address, ins.size
                 op_str = ins.op_str
@@ -493,12 +552,16 @@ class NativeDecoder:
                 if operand_text is None:
                     operand_text = operand_cache[op_str] = tuple(
                         part.strip() for part in op_str.split(",") if part.strip())
-                append({
-                    "addr": instruction_address, "size": instruction_size, "mnemonic": mnemonic,
-                    "operands": operand_text,
-                    "reads": read_names, "writes": write_names, "branch_info": branch,
-                    "arch_meta": metadata,
-                })
+                if compact is not None:
+                    append(vars(compact(instruction_address, instruction_size, mnemonic, operand_text,
+                                        read_names, write_names, branch, metadata)))
+                else:
+                    append({
+                        "addr": instruction_address, "size": instruction_size, "mnemonic": mnemonic,
+                        "operands": operand_text,
+                        "reads": read_names, "writes": write_names, "branch_info": branch,
+                        "arch_meta": metadata,
+                    })
         except Exception as exc:
             return output, [f"Capstone decode failed: {type(exc).__name__}: {exc}"]
         return output, []

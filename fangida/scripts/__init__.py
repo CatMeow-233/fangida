@@ -160,10 +160,11 @@ class ScriptContext:
         if not target.is_relative_to(self._export_root) or target == self._export_root:
             raise PermissionError("export destination must be inside export_root")
         target.parent.mkdir(parents=True, exist_ok=True)
-        # 仍是先完整序列化、再一次写入：序列化失败时不会留下半个文件。
+        # 与先完整序列化、再 write_text 写出的文件逐字节相同，但流式写出、不生成整串：先完整
+        # 校验一遍再原地写入，序列化失败时仍不会创建或截断目标文件。
         # 3.11/3.12 的 C 编码器不支持 indent，由分块编码器生成逐字节相同的文本。
-        payload = _json_stream.dumps(self._snapshot, indent=2, ensure_ascii=False)
-        target.write_text(payload + "\n", encoding="utf-8")
+        _json_stream.write_text(target, self._snapshot, end="\n", encoding="utf-8",
+                                indent=2, ensure_ascii=False)
         return target
 
     def _required_store(self) -> ProjectStoreProtocol:

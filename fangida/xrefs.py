@@ -7,9 +7,10 @@ stage until its future completes, so decoders never mutate it concurrently.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from bisect import bisect_right
 from dataclasses import dataclass, field
+from operator import itemgetter
 from threading import BoundedSemaphore, local
 from typing import Any, Callable, Iterable, TypeVar
 
@@ -219,6 +220,10 @@ def sorted_references(references: Iterable[dict[str, Any]]) -> list[dict[str, An
     return sorted(references, key=lambda ref: (ref["src"], ref["dst"], ref["kind"]))
 
 
+_SOURCE = itemgetter("src")
+_ABSENT = object()
+
+
 def index_references(functions: list[dict[str, Any]],
                      references: Iterable[dict[str, Any]]) -> None:
     """Attach references after the coordinator hands over the function records."""
@@ -226,25 +231,42 @@ def index_references(functions: list[dict[str, Any]],
     # （完整模式约 25 万个列表，会触发多次分代 GC）。结果与顺序不变。
     if not isinstance(references, (list, tuple)):
         references = list(references)
-    sources = {reference["src"] for reference in references}
-    by_start: dict[int, list[dict[str, Any]]] = {}
-    by_instruction: dict[int, list[dict[str, Any]]] = {}
+    # 引用源地址 -> 所属函数，一张表兼作“是否是引用源”的成员判断（不再另建源地址集合）。
+    # 值：None 表示尚无函数；一个函数时直接存该函数字典（实测几乎没有指令属于两个函数），
+    # 第二个函数出现时才换成列表。函数记录是字典，不会与列表混淆；追加顺序与次数不变。
+    owners_of: dict[int, Any] = dict.fromkeys(map(_SOURCE, references))
+    lookup = owners_of.get
+    by_start: dict[int, Any] = {}
     for function in functions:
-        by_start.setdefault(function["start"], []).append(function)
+        start = function["start"]
+        same = by_start.get(start)
+        if same is None:
+            by_start[start] = function
+        elif type(same) is list:
+            same.append(function)
+        else:
+            by_start[start] = [same, function]
         for block in function.get("blocks", []):
             for instruction in block["instructions"]:
                 address = instruction["addr"]
-                if address in sources:
-                    owners = by_instruction.get(address)
-                    if owners is None:
-                        by_instruction[address] = [function]
-                    else:
-                        owners.append(function)
+                owners = lookup(address, _ABSENT)
+                if owners is _ABSENT:
+                    continue
+                if owners is None:
+                    owners_of[address] = function
+                elif type(owners) is list:
+                    owners.append(function)
+                else:
+                    owners_of[address] = [owners, function]
     for reference in references:
-        for target in by_start.get(reference["dst"], []):
-            target.setdefault("xrefs_in", []).append(reference)
-        for source in by_instruction.get(reference["src"], []):
-            source.setdefault("xrefs_out", []).append(reference)
+        targets = by_start.get(reference["dst"])
+        if targets is not None:
+            for target in (targets if type(targets) is list else (targets,)):
+                target.setdefault("xrefs_in", []).append(reference)
+        sources = owners_of[reference["src"]]
+        if sources is not None:
+            for source in (sources if type(sources) is list else (sources,)):
+                source.setdefault("xrefs_out", []).append(reference)
 
 
 def index_entry_references(functions: list[dict[str, Any]],
@@ -292,6 +314,40 @@ class XrefStage:
             if self._closed:
                 raise RuntimeError("Xref stage is closed")
             return self._executor.submit(invoke).result()
+
+    def submit(self, function: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        """run() 的异步形式：返回 Future，调用方可以在引用分析进行时继续工作。
+
+        与 run() 共用同一个有界信号量：在途批次达到 max_pending 时调用方阻塞（背压），
+        不会无界堆积快照。单线程预算（或已在 xref 线程内）时就地执行并返回已完成的 Future。
+        """
+        if self._closed:
+            raise RuntimeError("Xref stage is closed")
+        if self._executor is None or getattr(self._local, "active", False):
+            future: Future[T] = Future()
+            try:
+                future.set_result(function(*args, **kwargs))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def invoke() -> T:
+            self._local.active = True
+            try:
+                return function(*args, **kwargs)
+            finally:
+                self._local.active = False
+
+        self._pending.acquire()
+        try:
+            if self._closed:
+                raise RuntimeError("Xref stage is closed")
+            future = self._executor.submit(invoke)
+        except BaseException:
+            self._pending.release()
+            raise
+        future.add_done_callback(lambda _: self._pending.release())
+        return future
 
     def close(self) -> None:
         if self._closed:
